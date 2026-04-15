@@ -116,6 +116,20 @@ def get_audio_duration_ms_and_size(audio_path: Path) -> tuple[int, int]:
     return len(audio), audio_path.stat().st_size
 
 
+def existing_file(path: Path) -> bool:
+    return path.exists() and path.is_file() and path.stat().st_size > 0
+
+
+def get_existing_output_path(row: sqlite3.Row, field_name: str, default_path: Path) -> Path:
+    stored_path = row[field_name]
+    if stored_path:
+        candidate = Path(stored_path)
+        if existing_file(candidate):
+            return candidate
+
+    return default_path
+
+
 # =========================================================
 # 2. DB 操作
 # =========================================================
@@ -763,6 +777,10 @@ def process_one_video(
     docx_path = material_dir / "文本.docx"
     chunk_dir = material_dir / "_chunks"
 
+    mp4_path = get_existing_output_path(row, "mp4_path", mp4_path)
+    wav_path = get_existing_output_path(row, "wav_path", wav_path)
+    docx_path = get_existing_output_path(row, "docx_path", docx_path)
+
     print("=" * 100)
     print(f"[VIDEO] 开始处理 item_id={item_id}")
     print(f"标题: {title}")
@@ -780,52 +798,113 @@ def process_one_video(
     current_step = "INIT"
 
     try:
-        # 1) 抓 m3u8
-        current_step = STEP_M3U8
-        record_video_event(conn, run_id, item_id, current_step, "START")
-        m3u8_url = get_first_m3u8(detail_url)
-        if not m3u8_url:
-            raise RuntimeError("未抓到 m3u8 地址")
+        if existing_file(docx_path):
+            update_video_record(
+                conn,
+                item_id,
+                docx_path=str(docx_path),
+                status=STATUS_DOCX_DONE,
+                docx_done_at=now_str(),
+                error_message=None,
+            )
+            record_video_event(conn, run_id, item_id, STEP_DOCX, "SKIPPED", f"复用已有文档：{docx_path}")
+            print(f"[SKIP] 已存在 Word 文档，直接标记完成: {docx_path}")
+            return STATUS_DOCX_DONE
 
-        update_video_record(
-            conn,
-            item_id,
-            m3u8_url=m3u8_url,
-            status=STATUS_M3U8_DONE,
-            m3u8_done_at=now_str(),
-            error_message=None,
-        )
-        record_video_event(conn, run_id, item_id, current_step, "SUCCESS", m3u8_url)
+        has_existing_wav = existing_file(wav_path)
+        has_existing_mp4 = existing_file(mp4_path)
+
+        # 1) 抓 m3u8
+        m3u8_url = row["m3u8_url"]
+        if m3u8_url or has_existing_mp4 or has_existing_wav:
+            update_fields = {
+                "status": STATUS_M3U8_DONE,
+                "error_message": None,
+            }
+            if m3u8_url:
+                update_fields["m3u8_url"] = m3u8_url
+                skip_message = "复用数据库中的 m3u8_url"
+            else:
+                skip_message = "已有本地媒体文件，无需重新捕获 m3u8"
+
+            update_video_record(conn, item_id, **update_fields)
+            record_video_event(conn, run_id, item_id, STEP_M3U8, "SKIPPED", skip_message)
+            print(f"[SKIP] {skip_message}")
+        else:
+            current_step = STEP_M3U8
+            record_video_event(conn, run_id, item_id, current_step, "START")
+            m3u8_url = get_first_m3u8(detail_url)
+            if not m3u8_url:
+                raise RuntimeError("未抓到 m3u8 地址")
+
+            update_video_record(
+                conn,
+                item_id,
+                m3u8_url=m3u8_url,
+                status=STATUS_M3U8_DONE,
+                m3u8_done_at=now_str(),
+                error_message=None,
+            )
+            record_video_event(conn, run_id, item_id, current_step, "SUCCESS", m3u8_url)
 
         # 2) 下载 mp4
-        current_step = STEP_VIDEO
-        record_video_event(conn, run_id, item_id, current_step, "START")
-        m3u8_to_mp4(m3u8_url, mp4_path)
-        update_video_record(
-            conn,
-            item_id,
-            mp4_path=str(mp4_path),
-            mp4_size=mp4_path.stat().st_size if mp4_path.exists() else None,
-            status=STATUS_VIDEO_DONE,
-            video_done_at=now_str(),
-        )
-        record_video_event(conn, run_id, item_id, current_step, "SUCCESS", str(mp4_path))
+        if has_existing_wav:
+            record_video_event(conn, run_id, item_id, STEP_VIDEO, "SKIPPED", f"已有音频，跳过视频下载：{wav_path}")
+            print(f"[SKIP] 已存在 wav，跳过视频下载: {wav_path}")
+        elif has_existing_mp4:
+            update_video_record(
+                conn,
+                item_id,
+                mp4_path=str(mp4_path),
+                mp4_size=mp4_path.stat().st_size,
+                status=STATUS_VIDEO_DONE,
+                error_message=None,
+            )
+            record_video_event(conn, run_id, item_id, STEP_VIDEO, "SKIPPED", f"复用已有视频：{mp4_path}")
+            print(f"[SKIP] 已存在 mp4，跳过下载: {mp4_path}")
+        else:
+            current_step = STEP_VIDEO
+            record_video_event(conn, run_id, item_id, current_step, "START")
+            m3u8_to_mp4(m3u8_url, mp4_path)
+            update_video_record(
+                conn,
+                item_id,
+                mp4_path=str(mp4_path),
+                mp4_size=mp4_path.stat().st_size if mp4_path.exists() else None,
+                status=STATUS_VIDEO_DONE,
+                video_done_at=now_str(),
+            )
+            record_video_event(conn, run_id, item_id, current_step, "SUCCESS", str(mp4_path))
 
         # 3) 提取 wav
-        current_step = STEP_AUDIO
-        record_video_event(conn, run_id, item_id, current_step, "START")
-        mp4_to_wav(mp4_path, wav_path)
-        audio_duration_ms, wav_size = get_audio_duration_ms_and_size(wav_path)
-        update_video_record(
-            conn,
-            item_id,
-            wav_path=str(wav_path),
-            wav_size=wav_size,
-            audio_duration_ms=audio_duration_ms,
-            status=STATUS_AUDIO_DONE,
-            audio_done_at=now_str(),
-        )
-        record_video_event(conn, run_id, item_id, current_step, "SUCCESS", str(wav_path))
+        if existing_file(wav_path):
+            audio_duration_ms, wav_size = get_audio_duration_ms_and_size(wav_path)
+            update_video_record(
+                conn,
+                item_id,
+                wav_path=str(wav_path),
+                wav_size=wav_size,
+                audio_duration_ms=audio_duration_ms,
+                status=STATUS_AUDIO_DONE,
+                error_message=None,
+            )
+            record_video_event(conn, run_id, item_id, STEP_AUDIO, "SKIPPED", f"复用已有音频：{wav_path}")
+            print(f"[SKIP] 已存在 wav，跳过音频提取: {wav_path}")
+        else:
+            current_step = STEP_AUDIO
+            record_video_event(conn, run_id, item_id, current_step, "START")
+            mp4_to_wav(mp4_path, wav_path)
+            audio_duration_ms, wav_size = get_audio_duration_ms_and_size(wav_path)
+            update_video_record(
+                conn,
+                item_id,
+                wav_path=str(wav_path),
+                wav_size=wav_size,
+                audio_duration_ms=audio_duration_ms,
+                status=STATUS_AUDIO_DONE,
+                audio_done_at=now_str(),
+            )
+            record_video_event(conn, run_id, item_id, current_step, "SUCCESS", str(wav_path))
 
         # 4) ASR（整段或切块）
         current_step = STEP_ASR
