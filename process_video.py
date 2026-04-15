@@ -166,7 +166,7 @@ def discover_db_targets(target_page_urls: list[str] | None = None) -> list[tuple
     [(site_name, json_name, db_path), ...]
 
     规则：
-    - target_page_urls is None -> 处理 DB_DIR 下全部网站的全部 db
+    - target_page_urls is None -> 处理运行数据库目录下全部网站的全部 db
     - target_page_urls 有值 -> 只处理这些网站名对应目录下的全部 db
     """
     targets = []
@@ -687,6 +687,8 @@ def process_one_db(
 
     print(f"待处理视频数：{len(pending_rows)}")
 
+    processed_item_ids = [row["item_id"] for row in pending_rows]
+
     for row in pending_rows:
         process_one_video(conn, site_name, json_name, row)
 
@@ -715,6 +717,7 @@ def process_one_db(
         "done_count": done,
         "failed_count": failed,
         "remaining_count": remain,
+        "processed_item_ids": processed_item_ids,
     }
 
 

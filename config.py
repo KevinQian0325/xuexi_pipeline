@@ -85,19 +85,22 @@ SILENCE_THRESH_OFFSET_DB = 16                # 相对整体 dBFS 的静音阈值
 
 
 # =========================
-# 9. 输出目录结构
-# output/
-#   fixed_json/<网站名>/<固定json>.json
-#   summary/<网站名>/<固定json>.json
-#   db/<网站名>/<固定json>.db
-#   materials/<网站名>/<固定json>/<视频标题>__<发布时间>/
+# 9. 目录结构
+# 程序运行文件夹/
+#   json存储库/<网站名>/<固定json>.json
+#   运行数据库/<网站名>/<固定json>.db
+#
+# 结果文件夹/
+#   爬取日志/<爬取的网址>__<爬取时间>.docx
+#   结果文件/<网站名>/<固定json>/<视频标题>__<发布时间>/
 # =========================
-OUTPUT_DIR = PROJECT_DIR / "output"
+RUNTIME_DIR = PROJECT_DIR / "程序运行文件夹"
+RESULT_OUTPUT_DIR = PROJECT_DIR / "结果文件夹"
 
-FIXED_JSON_DIR = OUTPUT_DIR / "fixed_json"
-SUMMARY_DIR = OUTPUT_DIR / "summary"
-DB_DIR = OUTPUT_DIR / "db"
-MATERIALS_DIR = OUTPUT_DIR / "materials"
+FIXED_JSON_DIR = RUNTIME_DIR / "json存储库"
+DB_DIR = RUNTIME_DIR / "运行数据库"
+SUMMARY_DIR = RESULT_OUTPUT_DIR / "爬取日志"
+MATERIALS_DIR = RESULT_OUTPUT_DIR / "结果文件"
 
 
 # =========================
@@ -183,7 +186,7 @@ def get_fixed_json_dir(site_name: str) -> Path:
 
 
 def get_summary_dir(site_name: str) -> Path:
-    return SUMMARY_DIR / site_name
+    return SUMMARY_DIR
 
 
 def get_db_dir(site_name: str) -> Path:
@@ -199,7 +202,8 @@ def get_fixed_json_path(site_name: str, json_name: str) -> Path:
 
 
 def get_summary_path(site_name: str, json_name: str) -> Path:
-    return get_summary_dir(site_name) / json_name
+    docx_name = json_name.replace(".json", ".docx")
+    return get_summary_dir(site_name) / docx_name
 
 
 def get_db_path(site_name: str, json_name: str) -> Path:

@@ -78,7 +78,7 @@ def is_video_record(d: dict) -> bool:
 
 def extract_video_records(data: dict) -> list[dict]:
     """
-    从 fixed json 中提取视频记录
+    从固定 JSON 中提取视频记录
     """
     records = []
     dicts = flatten_json(data)
@@ -116,7 +116,7 @@ def extract_video_records(data: dict) -> list[dict]:
 
 def create_table(conn: sqlite3.Connection) -> None:
     """
-    建表：每个 db 对应一个 fixed json
+    建表：每个运行数据库对应一个固定 JSON
     """
     conn.execute("""
     CREATE TABLE IF NOT EXISTS videos (
@@ -213,7 +213,7 @@ def upsert_video_record(conn: sqlite3.Connection, record: dict) -> None:
 
 def build_index_for_one_json(site_name: str, json_name: str, json_path: Path) -> dict:
     """
-    单个 fixed json -> 对应 db
+    单个固定 JSON -> 对应运行数据库
     """
     print("=" * 100)
     print(f"开始建索引：{json_path}")
@@ -253,12 +253,12 @@ def build_index_for_one_json(site_name: str, json_name: str, json_path: Path) ->
 
 def build_index_for_all_fixed_json() -> list[dict]:
     """
-    遍历 fixed_json 目录，为每个 网站/固定json 建立对应 db
+    遍历 JSON 存储库目录，为每个 网站/固定json 建立对应运行数据库
     """
     results = []
 
     if not FIXED_JSON_DIR.exists():
-        print(f"fixed_json 目录不存在：{FIXED_JSON_DIR}")
+        print(f"JSON 存储库目录不存在：{FIXED_JSON_DIR}")
         return results
 
     for site_dir in FIXED_JSON_DIR.iterdir():

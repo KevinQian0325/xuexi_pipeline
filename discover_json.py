@@ -55,7 +55,7 @@ def flatten_json(obj):
 def is_valid_content_record(d: dict) -> bool:
     """
     判断一个 dict 是否是“有效内容条目”
-    这里只用于筛选“哪些 fixed json 值得保存”
+    这里只用于筛选“哪些固定 JSON 值得保存”
     不是最终的视频判断。
     """
     if not isinstance(d, dict):
@@ -157,7 +157,7 @@ def discover_lgdata_candidates(page_url: str, headless: bool = True, wait_ms: in
 
 def collect_qualified_jsons(candidate_urls: list[str], threshold: int) -> list[dict]:
     """
-    从候选 JSON 中筛出满足阈值的 fixed json
+    从候选 JSON 中筛出满足阈值的固定 JSON
     """
     qualified = []
 
@@ -190,8 +190,8 @@ def collect_qualified_jsons(candidate_urls: list[str], threshold: int) -> list[d
 
 def save_qualified_jsons(page_url: str, qualified_jsons: list[dict]) -> list[str]:
     """
-    保存 fixed json 到：
-    output/fixed_json/<网站名>/<固定json>.json
+    保存固定 JSON 到：
+    程序运行文件夹/json存储库/<网站名>/<固定json>.json
     """
     site_name = page_url_to_site_name(page_url)
     site_dir = get_fixed_json_dir(site_name)
@@ -218,7 +218,7 @@ def save_qualified_jsons(page_url: str, qualified_jsons: list[dict]) -> list[str
 def crawl_fixed_jsons_for_page(page_url: str) -> dict:
     """
     单个网站页完整流程：
-    发现候选 -> 筛选 -> 保存 fixed json
+    发现候选 -> 筛选 -> 保存固定 JSON
     """
     print("=" * 100)
     print("开始处理页面：")
