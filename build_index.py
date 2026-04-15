@@ -11,6 +11,26 @@ from config import (
 )
 
 
+VIDEO_EXTRA_COLUMNS = {
+    "source_page_url": "TEXT",
+    "source_json_name": "TEXT",
+    "material_dir": "TEXT",
+    "attempt_count": "INTEGER DEFAULT 0",
+    "last_run_id": "TEXT",
+    "last_processed_at": "TEXT",
+    "error_step": "TEXT",
+    "error_type": "TEXT",
+    "m3u8_done_at": "TEXT",
+    "video_done_at": "TEXT",
+    "audio_done_at": "TEXT",
+    "asr_done_at": "TEXT",
+    "docx_done_at": "TEXT",
+    "mp4_size": "INTEGER",
+    "wav_size": "INTEGER",
+    "audio_duration_ms": "INTEGER",
+}
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -78,7 +98,7 @@ def is_video_record(d: dict) -> bool:
 
 def extract_video_records(data: dict) -> list[dict]:
     """
-    从 fixed json 中提取视频记录
+    从固定 JSON 中提取视频记录
     """
     records = []
     dicts = flatten_json(data)
@@ -116,7 +136,7 @@ def extract_video_records(data: dict) -> list[dict]:
 
 def create_table(conn: sqlite3.Connection) -> None:
     """
-    建表：每个 db 对应一个 fixed json
+    建表/迁移：每个运行数据库对应一个固定 JSON
     """
     conn.execute("""
     CREATE TABLE IF NOT EXISTS videos (
@@ -136,6 +156,52 @@ def create_table(conn: sqlite3.Connection) -> None:
         updated_at TEXT NOT NULL
     )
     """)
+
+    existing_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(videos)").fetchall()
+    }
+
+    for column_name, column_type in VIDEO_EXTRA_COLUMNS.items():
+        if column_name not in existing_columns:
+            conn.execute(f"ALTER TABLE videos ADD COLUMN {column_name} {column_type}")
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS crawl_runs (
+        run_id TEXT PRIMARY KEY,
+        page_url TEXT NOT NULL,
+        process_start_time TEXT,
+        process_end_time TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        status TEXT NOT NULL,
+        target_count INTEGER DEFAULT 0,
+        success_count INTEGER DEFAULT 0,
+        failed_count INTEGER DEFAULT 0,
+        crawl_log_path TEXT,
+        error_message TEXT
+    )
+    """)
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS video_events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        step TEXT NOT NULL,
+        status TEXT NOT NULL,
+        message TEXT,
+        created_at TEXT NOT NULL
+    )
+    """)
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_status ON videos(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_publish_time ON videos(publish_time)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_status_publish_time ON videos(status, publish_time)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_last_run_id ON videos(last_run_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crawl_runs_started_at ON crawl_runs(started_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_video_events_run_item ON video_events(run_id, item_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_video_events_step_status ON video_events(step, status)")
     conn.commit()
 
 
@@ -210,10 +276,21 @@ def upsert_video_record(conn: sqlite3.Connection, record: dict) -> None:
 
     conn.commit()
 
+    conn.execute("""
+    UPDATE videos
+    SET
+        source_json_name = COALESCE(source_json_name, ?)
+    WHERE item_id = ?
+    """, (
+        record.get("source_json_name"),
+        record["item_id"],
+    ))
+    conn.commit()
+
 
 def build_index_for_one_json(site_name: str, json_name: str, json_path: Path) -> dict:
     """
-    单个 fixed json -> 对应 db
+    单个固定 JSON -> 对应运行数据库
     """
     print("=" * 100)
     print(f"开始建索引：{json_path}")
@@ -231,6 +308,7 @@ def build_index_for_one_json(site_name: str, json_name: str, json_path: Path) ->
     create_table(conn)
 
     for record in records:
+        record["source_json_name"] = json_name
         upsert_video_record(conn, record)
 
     total = conn.execute("SELECT COUNT(*) FROM videos").fetchone()[0]
@@ -253,12 +331,12 @@ def build_index_for_one_json(site_name: str, json_name: str, json_path: Path) ->
 
 def build_index_for_all_fixed_json() -> list[dict]:
     """
-    遍历 fixed_json 目录，为每个 网站/固定json 建立对应 db
+    遍历 JSON 存储库目录，为每个 网站/固定json 建立对应运行数据库
     """
     results = []
 
     if not FIXED_JSON_DIR.exists():
-        print(f"fixed_json 目录不存在：{FIXED_JSON_DIR}")
+        print(f"JSON 存储库目录不存在：{FIXED_JSON_DIR}")
         return results
 
     for site_dir in FIXED_JSON_DIR.iterdir():

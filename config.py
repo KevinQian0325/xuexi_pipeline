@@ -1,10 +1,34 @@
+import os
 from pathlib import Path
+
+
+def load_local_env(env_path: Path) -> None:
+    """
+    轻量读取项目根目录下的 .env，不额外依赖 python-dotenv。
+    已存在的系统环境变量优先级更高。
+    """
+    if not env_path.exists():
+        return
+
+    with open(env_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+
+            if key and key not in os.environ:
+                os.environ[key] = value
 
 
 # =========================
 # 1. 项目根目录
 # =========================
-PROJECT_DIR = Path("/Users/kevinqian/Documents/Code/Intern XuanRong Technology/xuexi_pipeline")
+PROJECT_DIR = Path(__file__).resolve().parent
+load_local_env(PROJECT_DIR / ".env")
 
 
 # =========================
@@ -21,7 +45,7 @@ PAGE_URLS = [
 TARGET_PAGE_URLS = None
 
 # 时间范围筛选
-PROCESS_START_TIME = "2026-03-01 00:00:00"
+PROCESS_START_TIME = "2026-03-05 00:00:00"
 PROCESS_END_TIME = "2026-03-05 23:59:59"
 
 
@@ -53,10 +77,13 @@ DEFAULT_END_TIME = None
 # =========================
 # 6. ASR 配置
 # =========================
-APP_ID = "1"
-ACCESS_TOKEN = "o11XMn"
-RECOGNIZE_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash"
-RESOURCE_ID = "volc.bigasr.auc_turbo"
+APP_ID = os.getenv("XUEXI_APP_ID", "")
+ACCESS_TOKEN = os.getenv("XUEXI_ACCESS_TOKEN", "")
+RECOGNIZE_URL = os.getenv(
+    "XUEXI_RECOGNIZE_URL",
+    "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash",
+)
+RESOURCE_ID = os.getenv("XUEXI_RESOURCE_ID", "volc.bigasr.auc_turbo")
 
 
 # =========================
@@ -85,19 +112,22 @@ SILENCE_THRESH_OFFSET_DB = 16                # 相对整体 dBFS 的静音阈值
 
 
 # =========================
-# 9. 输出目录结构
-# output/
-#   fixed_json/<网站名>/<固定json>.json
-#   summary/<网站名>/<固定json>.json
-#   db/<网站名>/<固定json>.db
-#   materials/<网站名>/<固定json>/<视频标题>__<发布时间>/
+# 9. 目录结构
+# 程序运行文件夹/
+#   json存储库/<网站名>/<固定json>.json
+#   运行数据库/<网站名>/<固定json>.db
+#
+# 结果文件夹/
+#   爬取日志/<爬取的网址>__<爬取时间>.json
+#   结果文件/<网站名>/<固定json>/<视频标题>__<发布时间>/
 # =========================
-OUTPUT_DIR = PROJECT_DIR / "output"
+RUNTIME_DIR = PROJECT_DIR / "程序运行文件夹"
+RESULT_OUTPUT_DIR = PROJECT_DIR / "结果文件夹"
 
-FIXED_JSON_DIR = OUTPUT_DIR / "fixed_json"
-SUMMARY_DIR = OUTPUT_DIR / "summary"
-DB_DIR = OUTPUT_DIR / "db"
-MATERIALS_DIR = OUTPUT_DIR / "materials"
+FIXED_JSON_DIR = RUNTIME_DIR / "json存储库"
+DB_DIR = RUNTIME_DIR / "运行数据库"
+SUMMARY_DIR = RESULT_OUTPUT_DIR / "爬取日志"
+MATERIALS_DIR = RESULT_OUTPUT_DIR / "结果文件"
 
 
 # =========================
@@ -183,7 +213,7 @@ def get_fixed_json_dir(site_name: str) -> Path:
 
 
 def get_summary_dir(site_name: str) -> Path:
-    return SUMMARY_DIR / site_name
+    return SUMMARY_DIR
 
 
 def get_db_dir(site_name: str) -> Path:

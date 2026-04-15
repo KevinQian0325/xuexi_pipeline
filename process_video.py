@@ -44,6 +44,14 @@ from config import (
     get_video_material_dir,
 )
 from capture_m3u8 import get_first_m3u8
+from build_index import create_table
+
+
+STEP_M3U8 = "M3U8_CAPTURE"
+STEP_VIDEO = "VIDEO_DOWNLOAD"
+STEP_AUDIO = "AUDIO_EXTRACT"
+STEP_ASR = "ASR_RECOGNIZE"
+STEP_DOCX = "DOCX_GENERATE"
 
 
 # =========================================================
@@ -108,6 +116,20 @@ def get_audio_duration_ms_and_size(audio_path: Path) -> tuple[int, int]:
     return len(audio), audio_path.stat().st_size
 
 
+def existing_file(path: Path) -> bool:
+    return path.exists() and path.is_file() and path.stat().st_size > 0
+
+
+def get_existing_output_path(row: sqlite3.Row, field_name: str, default_path: Path) -> Path:
+    stored_path = row[field_name]
+    if stored_path:
+        candidate = Path(stored_path)
+        if existing_file(candidate):
+            return candidate
+
+    return default_path
+
+
 # =========================================================
 # 2. DB 操作
 # =========================================================
@@ -128,6 +150,165 @@ def update_video_record(conn: sqlite3.Connection, item_id: str, **fields) -> Non
     conn.commit()
 
 
+def mark_video_attempt(
+    conn: sqlite3.Connection,
+    item_id: str,
+    run_id: str,
+    page_url: str,
+    json_name: str,
+    material_dir: Path,
+) -> None:
+    """
+    标记某条视频进入本轮处理。
+    """
+    conn.execute("""
+    UPDATE videos
+    SET
+        attempt_count = COALESCE(attempt_count, 0) + 1,
+        last_run_id = ?,
+        last_processed_at = ?,
+        source_page_url = ?,
+        source_json_name = ?,
+        material_dir = ?,
+        error_step = NULL,
+        error_type = NULL,
+        error_message = NULL,
+        updated_at = ?
+    WHERE item_id = ?
+    """, (
+        run_id,
+        now_str(),
+        page_url,
+        json_name,
+        str(material_dir),
+        now_str(),
+        item_id,
+    ))
+    conn.commit()
+
+
+def record_video_event(
+    conn: sqlite3.Connection,
+    run_id: str,
+    item_id: str,
+    step: str,
+    status: str,
+    message: str | None = None,
+) -> None:
+    """
+    记录单条视频的阶段事件，便于后期排查。
+    """
+    conn.execute("""
+    INSERT INTO video_events (
+        run_id,
+        item_id,
+        step,
+        status,
+        message,
+        created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        run_id,
+        item_id,
+        step,
+        status,
+        message,
+        now_str(),
+    ))
+    conn.commit()
+
+
+def create_or_update_crawl_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    page_url: str,
+    process_start_time: str | None,
+    process_end_time: str | None,
+    started_at: str,
+    target_count: int,
+) -> None:
+    conn.execute("""
+    INSERT INTO crawl_runs (
+        run_id,
+        page_url,
+        process_start_time,
+        process_end_time,
+        started_at,
+        status,
+        target_count,
+        success_count,
+        failed_count
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)
+    ON CONFLICT(run_id) DO UPDATE SET
+        page_url = excluded.page_url,
+        process_start_time = excluded.process_start_time,
+        process_end_time = excluded.process_end_time,
+        started_at = excluded.started_at,
+        status = excluded.status,
+        target_count = excluded.target_count
+    """, (
+        run_id,
+        page_url,
+        process_start_time,
+        process_end_time,
+        started_at,
+        "RUNNING",
+        target_count,
+    ))
+    conn.commit()
+
+
+def finish_crawl_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    success_count: int,
+    failed_count: int,
+    error_message: str | None = None,
+) -> None:
+    if failed_count > 0 and success_count > 0:
+        status = "PARTIAL_FAILED"
+    elif failed_count > 0:
+        status = "FAILED"
+    else:
+        status = "SUCCESS"
+
+    conn.execute("""
+    UPDATE crawl_runs
+    SET
+        finished_at = ?,
+        status = ?,
+        success_count = ?,
+        failed_count = ?,
+        error_message = ?
+    WHERE run_id = ?
+    """, (
+        now_str(),
+        status,
+        success_count,
+        failed_count,
+        error_message,
+        run_id,
+    ))
+    conn.commit()
+
+
+def update_crawl_log_path(db_path: Path, run_id: str, crawl_log_path: str) -> None:
+    conn = sqlite3.connect(db_path)
+    create_table(conn)
+    conn.execute("""
+    UPDATE crawl_runs
+    SET crawl_log_path = ?
+    WHERE run_id = ?
+    """, (
+        crawl_log_path,
+        run_id,
+    ))
+    conn.commit()
+    conn.close()
+
+
 def load_pending_videos(
     conn: sqlite3.Connection,
     start_time: str | None = None,
@@ -146,14 +327,14 @@ def load_pending_videos(
     params = [STATUS_DOCX_DONE]
 
     if start_time:
-        sql += " AND datetime(publish_time) >= datetime(?)"
+        sql += " AND publish_time >= ?"
         params.append(start_time)
 
     if end_time:
-        sql += " AND datetime(publish_time) <= datetime(?)"
+        sql += " AND publish_time <= ?"
         params.append(end_time)
 
-    sql += " ORDER BY datetime(publish_time) DESC"
+    sql += " ORDER BY publish_time DESC"
 
     conn.row_factory = sqlite3.Row
     rows = conn.execute(sql, params).fetchall()
@@ -166,7 +347,7 @@ def discover_db_targets(target_page_urls: list[str] | None = None) -> list[tuple
     [(site_name, json_name, db_path), ...]
 
     规则：
-    - target_page_urls is None -> 处理 DB_DIR 下全部网站的全部 db
+    - target_page_urls is None -> 处理运行数据库目录下全部网站的全部 db
     - target_page_urls 有值 -> 只处理这些网站名对应目录下的全部 db
     """
     targets = []
@@ -235,8 +416,8 @@ def mp4_to_wav(mp4_path: Path, wav_path: Path) -> None:
 # 4. ASR
 # =========================================================
 def recognize_flash(file_path: Path) -> dict:
-    if APP_ID.startswith("你的") or ACCESS_TOKEN.startswith("你的"):
-        raise ValueError("请先在 config.py 中配置真实的 APP_ID 和 ACCESS_TOKEN。")
+    if not APP_ID or not ACCESS_TOKEN:
+        raise ValueError("请先在 .env 中配置 XUEXI_APP_ID 和 XUEXI_ACCESS_TOKEN。")
 
     headers = {
         "X-Api-App-Key": APP_ID,
@@ -575,7 +756,14 @@ def json_to_word(data: dict, output_docx: Path, title: str) -> None:
 # =========================================================
 # 6. 单条视频处理
 # =========================================================
-def process_one_video(conn: sqlite3.Connection, site_name: str, json_name: str, row: sqlite3.Row) -> None:
+def process_one_video(
+    conn: sqlite3.Connection,
+    site_name: str,
+    json_name: str,
+    row: sqlite3.Row,
+    run_id: str,
+    page_url: str,
+) -> str:
     item_id = row["item_id"]
     title = row["title"]
     publish_time = row["publish_time"]
@@ -589,77 +777,183 @@ def process_one_video(conn: sqlite3.Connection, site_name: str, json_name: str, 
     docx_path = material_dir / "文本.docx"
     chunk_dir = material_dir / "_chunks"
 
+    mp4_path = get_existing_output_path(row, "mp4_path", mp4_path)
+    wav_path = get_existing_output_path(row, "wav_path", wav_path)
+    docx_path = get_existing_output_path(row, "docx_path", docx_path)
+
     print("=" * 100)
     print(f"[VIDEO] 开始处理 item_id={item_id}")
     print(f"标题: {title}")
     print(f"发布时间: {publish_time}")
 
-    try:
-        # 1) 抓 m3u8
-        m3u8_url = get_first_m3u8(detail_url)
-        if not m3u8_url:
-            raise RuntimeError("未抓到 m3u8 地址")
+    mark_video_attempt(
+        conn=conn,
+        item_id=item_id,
+        run_id=run_id,
+        page_url=page_url,
+        json_name=json_name,
+        material_dir=material_dir,
+    )
 
-        update_video_record(
-            conn,
-            item_id,
-            m3u8_url=m3u8_url,
-            status=STATUS_M3U8_DONE,
-            error_message=None,
-        )
+    current_step = "INIT"
+
+    try:
+        if existing_file(docx_path):
+            update_video_record(
+                conn,
+                item_id,
+                docx_path=str(docx_path),
+                status=STATUS_DOCX_DONE,
+                docx_done_at=now_str(),
+                error_message=None,
+            )
+            record_video_event(conn, run_id, item_id, STEP_DOCX, "SKIPPED", f"复用已有文档：{docx_path}")
+            print(f"[SKIP] 已存在 Word 文档，直接标记完成: {docx_path}")
+            return STATUS_DOCX_DONE
+
+        has_existing_wav = existing_file(wav_path)
+        has_existing_mp4 = existing_file(mp4_path)
+
+        # 1) 抓 m3u8
+        m3u8_url = row["m3u8_url"]
+        if m3u8_url or has_existing_mp4 or has_existing_wav:
+            update_fields = {
+                "status": STATUS_M3U8_DONE,
+                "error_message": None,
+            }
+            if m3u8_url:
+                update_fields["m3u8_url"] = m3u8_url
+                skip_message = "复用数据库中的 m3u8_url"
+            else:
+                skip_message = "已有本地媒体文件，无需重新捕获 m3u8"
+
+            update_video_record(conn, item_id, **update_fields)
+            record_video_event(conn, run_id, item_id, STEP_M3U8, "SKIPPED", skip_message)
+            print(f"[SKIP] {skip_message}")
+        else:
+            current_step = STEP_M3U8
+            record_video_event(conn, run_id, item_id, current_step, "START")
+            m3u8_url = get_first_m3u8(detail_url)
+            if not m3u8_url:
+                raise RuntimeError("未抓到 m3u8 地址")
+
+            update_video_record(
+                conn,
+                item_id,
+                m3u8_url=m3u8_url,
+                status=STATUS_M3U8_DONE,
+                m3u8_done_at=now_str(),
+                error_message=None,
+            )
+            record_video_event(conn, run_id, item_id, current_step, "SUCCESS", m3u8_url)
 
         # 2) 下载 mp4
-        m3u8_to_mp4(m3u8_url, mp4_path)
-        update_video_record(
-            conn,
-            item_id,
-            mp4_path=str(mp4_path),
-            status=STATUS_VIDEO_DONE,
-        )
+        if has_existing_wav:
+            record_video_event(conn, run_id, item_id, STEP_VIDEO, "SKIPPED", f"已有音频，跳过视频下载：{wav_path}")
+            print(f"[SKIP] 已存在 wav，跳过视频下载: {wav_path}")
+        elif has_existing_mp4:
+            update_video_record(
+                conn,
+                item_id,
+                mp4_path=str(mp4_path),
+                mp4_size=mp4_path.stat().st_size,
+                status=STATUS_VIDEO_DONE,
+                error_message=None,
+            )
+            record_video_event(conn, run_id, item_id, STEP_VIDEO, "SKIPPED", f"复用已有视频：{mp4_path}")
+            print(f"[SKIP] 已存在 mp4，跳过下载: {mp4_path}")
+        else:
+            current_step = STEP_VIDEO
+            record_video_event(conn, run_id, item_id, current_step, "START")
+            m3u8_to_mp4(m3u8_url, mp4_path)
+            update_video_record(
+                conn,
+                item_id,
+                mp4_path=str(mp4_path),
+                mp4_size=mp4_path.stat().st_size if mp4_path.exists() else None,
+                status=STATUS_VIDEO_DONE,
+                video_done_at=now_str(),
+            )
+            record_video_event(conn, run_id, item_id, current_step, "SUCCESS", str(mp4_path))
 
         # 3) 提取 wav
-        mp4_to_wav(mp4_path, wav_path)
-        update_video_record(
-            conn,
-            item_id,
-            wav_path=str(wav_path),
-            status=STATUS_AUDIO_DONE,
-        )
+        if existing_file(wav_path):
+            audio_duration_ms, wav_size = get_audio_duration_ms_and_size(wav_path)
+            update_video_record(
+                conn,
+                item_id,
+                wav_path=str(wav_path),
+                wav_size=wav_size,
+                audio_duration_ms=audio_duration_ms,
+                status=STATUS_AUDIO_DONE,
+                error_message=None,
+            )
+            record_video_event(conn, run_id, item_id, STEP_AUDIO, "SKIPPED", f"复用已有音频：{wav_path}")
+            print(f"[SKIP] 已存在 wav，跳过音频提取: {wav_path}")
+        else:
+            current_step = STEP_AUDIO
+            record_video_event(conn, run_id, item_id, current_step, "START")
+            mp4_to_wav(mp4_path, wav_path)
+            audio_duration_ms, wav_size = get_audio_duration_ms_and_size(wav_path)
+            update_video_record(
+                conn,
+                item_id,
+                wav_path=str(wav_path),
+                wav_size=wav_size,
+                audio_duration_ms=audio_duration_ms,
+                status=STATUS_AUDIO_DONE,
+                audio_done_at=now_str(),
+            )
+            record_video_event(conn, run_id, item_id, current_step, "SUCCESS", str(wav_path))
 
         # 4) ASR（整段或切块）
+        current_step = STEP_ASR
+        record_video_event(conn, run_id, item_id, current_step, "START")
         asr_result = recognize_flash_smart(wav_path, chunk_dir)
         update_video_record(
             conn,
             item_id,
             status=STATUS_ASR_DONE,
+            asr_done_at=now_str(),
         )
+        record_video_event(conn, run_id, item_id, current_step, "SUCCESS")
 
         # 5) 生成 Word
+        current_step = STEP_DOCX
+        record_video_event(conn, run_id, item_id, current_step, "START")
         json_to_word(asr_result, docx_path, title=title)
         update_video_record(
             conn,
             item_id,
             docx_path=str(docx_path),
             status=STATUS_DOCX_DONE,
+            docx_done_at=now_str(),
             error_message=None,
         )
+        record_video_event(conn, run_id, item_id, current_step, "SUCCESS", str(docx_path))
 
         # 成功后删除切块目录
         remove_dir_if_exists(chunk_dir)
 
         print(f"[DONE] item_id={item_id} 处理完成")
+        return STATUS_DOCX_DONE
 
     except Exception as e:
         # 失败也删除切块目录
         remove_dir_if_exists(chunk_dir)
 
+        error_message = str(e)
         update_video_record(
             conn,
             item_id,
             status=STATUS_FAILED,
-            error_message=str(e),
+            error_step=current_step,
+            error_type=type(e).__name__,
+            error_message=error_message,
         )
+        record_video_event(conn, run_id, item_id, current_step, "FAILED", error_message)
         print(f"[FAILED] item_id={item_id} -> {e}")
+        return STATUS_FAILED
 
 
 # =========================================================
@@ -671,13 +965,21 @@ def process_one_db(
     db_path: Path,
     start_time: str | None = None,
     end_time: str | None = None,
+    run_id: str | None = None,
+    page_url: str | None = None,
+    run_started_at: str | None = None,
 ) -> dict:
     print("\n" + "#" * 100)
     print(f"开始处理 DB：{db_path}")
     print(f"时间范围：start_time={start_time}, end_time={end_time}")
 
+    run_id = run_id or str(uuid.uuid4())
+    page_url = page_url or site_name
+    run_started_at = run_started_at or now_str()
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    create_table(conn)
 
     pending_rows = load_pending_videos(
         conn,
@@ -687,8 +989,37 @@ def process_one_db(
 
     print(f"待处理视频数：{len(pending_rows)}")
 
+    processed_item_ids = [row["item_id"] for row in pending_rows]
+    create_or_update_crawl_run(
+        conn=conn,
+        run_id=run_id,
+        page_url=page_url,
+        process_start_time=start_time,
+        process_end_time=end_time,
+        started_at=run_started_at,
+        target_count=len(pending_rows),
+    )
+
+    final_statuses = []
     for row in pending_rows:
-        process_one_video(conn, site_name, json_name, row)
+        final_status = process_one_video(
+            conn=conn,
+            site_name=site_name,
+            json_name=json_name,
+            row=row,
+            run_id=run_id,
+            page_url=page_url,
+        )
+        final_statuses.append(final_status)
+
+    run_success_count = sum(1 for status in final_statuses if status == STATUS_DOCX_DONE)
+    run_failed_count = sum(1 for status in final_statuses if status == STATUS_FAILED)
+    finish_crawl_run(
+        conn=conn,
+        run_id=run_id,
+        success_count=run_success_count,
+        failed_count=run_failed_count,
+    )
 
     remain = conn.execute(
         "SELECT COUNT(*) FROM videos WHERE status != ?",
@@ -711,10 +1042,15 @@ def process_one_db(
         "site_name": site_name,
         "json_name": json_name,
         "db_path": str(db_path),
+        "run_id": run_id,
+        "page_url": page_url,
         "processed_count": len(pending_rows),
+        "run_success_count": run_success_count,
+        "run_failed_count": run_failed_count,
         "done_count": done,
         "failed_count": failed,
         "remaining_count": remain,
+        "processed_item_ids": processed_item_ids,
     }
 
 
@@ -725,6 +1061,8 @@ def process_sites(
     target_page_urls: list[str] | None = None,
     start_time: str | None = None,
     end_time: str | None = None,
+    run_id: str | None = None,
+    run_started_at: str | None = None,
 ) -> list[dict]:
     """
     由 pipeline 调用：
@@ -742,6 +1080,15 @@ def process_sites(
         return []
 
     results = []
+    run_id = run_id or str(uuid.uuid4())
+    run_started_at = run_started_at or now_str()
+
+    page_url_by_site = {}
+    if target_page_urls:
+        page_url_by_site = {
+            page_url_to_site_name(url): url
+            for url in target_page_urls
+        }
 
     for site_name, json_name, db_path in targets:
         result = process_one_db(
@@ -750,6 +1097,9 @@ def process_sites(
             db_path=db_path,
             start_time=start_time,
             end_time=end_time,
+            run_id=run_id,
+            page_url=page_url_by_site.get(site_name, site_name),
+            run_started_at=run_started_at,
         )
         results.append(result)
 

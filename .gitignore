@@ -1,0 +1,34 @@
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+
+# Runtime data and generated results
+程序运行文件夹/
+结果文件夹/
+output/
+
+# Large/generated media and documents
+*.db
+*.sqlite
+*.sqlite3
+*.mp4
+*.wav
+*.m4a
+*.mp3
+*.docx
+
+# Logs
+*.log

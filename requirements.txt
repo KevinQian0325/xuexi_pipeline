@@ -1,0 +1,4 @@
+playwright
+pydub
+python-docx
+requests
