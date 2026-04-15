@@ -1,10 +1,34 @@
+import os
 from pathlib import Path
+
+
+def load_local_env(env_path: Path) -> None:
+    """
+    轻量读取项目根目录下的 .env，不额外依赖 python-dotenv。
+    已存在的系统环境变量优先级更高。
+    """
+    if not env_path.exists():
+        return
+
+    with open(env_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+
+            if key and key not in os.environ:
+                os.environ[key] = value
 
 
 # =========================
 # 1. 项目根目录
 # =========================
-PROJECT_DIR = Path("/Users/kevinqian/Documents/Code/Intern XuanRong Technology/xuexi_pipeline")
+PROJECT_DIR = Path(__file__).resolve().parent
+load_local_env(PROJECT_DIR / ".env")
 
 
 # =========================
@@ -53,10 +77,13 @@ DEFAULT_END_TIME = None
 # =========================
 # 6. ASR 配置
 # =========================
-APP_ID = "1458922620"
-ACCESS_TOKEN = "ow-aXCZgOOoGXHvinKJGnJNOU3kP1XMn"
-RECOGNIZE_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash"
-RESOURCE_ID = "volc.bigasr.auc_turbo"
+APP_ID = os.getenv("XUEXI_APP_ID", "")
+ACCESS_TOKEN = os.getenv("XUEXI_ACCESS_TOKEN", "")
+RECOGNIZE_URL = os.getenv(
+    "XUEXI_RECOGNIZE_URL",
+    "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash",
+)
+RESOURCE_ID = os.getenv("XUEXI_RESOURCE_ID", "volc.bigasr.auc_turbo")
 
 
 # =========================

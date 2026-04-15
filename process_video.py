@@ -402,8 +402,8 @@ def mp4_to_wav(mp4_path: Path, wav_path: Path) -> None:
 # 4. ASR
 # =========================================================
 def recognize_flash(file_path: Path) -> dict:
-    if APP_ID.startswith("你的") or ACCESS_TOKEN.startswith("你的"):
-        raise ValueError("请先在 config.py 中配置真实的 APP_ID 和 ACCESS_TOKEN。")
+    if not APP_ID or not ACCESS_TOKEN:
+        raise ValueError("请先在 .env 中配置 XUEXI_APP_ID 和 XUEXI_ACCESS_TOKEN。")
 
     headers = {
         "X-Api-App-Key": APP_ID,
