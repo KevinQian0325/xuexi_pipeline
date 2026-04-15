@@ -53,8 +53,8 @@ DEFAULT_END_TIME = None
 # =========================
 # 6. ASR 配置
 # =========================
-APP_ID = "1458922620"
-ACCESS_TOKEN = "ow-aXCZgOOoGXHvinKJGnJNOU3kP1XMn"
+APP_ID = "1"
+ACCESS_TOKEN = "o11XMn"
 RECOGNIZE_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash"
 RESOURCE_ID = "volc.bigasr.auc_turbo"
 
