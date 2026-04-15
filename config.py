@@ -21,7 +21,7 @@ PAGE_URLS = [
 TARGET_PAGE_URLS = None
 
 # 时间范围筛选
-PROCESS_START_TIME = "2026-03-01 00:00:00"
+PROCESS_START_TIME = "2026-03-05 00:00:00"
 PROCESS_END_TIME = "2026-03-05 23:59:59"
 
 
@@ -91,7 +91,7 @@ SILENCE_THRESH_OFFSET_DB = 16                # 相对整体 dBFS 的静音阈值
 #   运行数据库/<网站名>/<固定json>.db
 #
 # 结果文件夹/
-#   爬取日志/<爬取的网址>__<爬取时间>.docx
+#   爬取日志/<爬取的网址>__<爬取时间>.json
 #   结果文件/<网站名>/<固定json>/<视频标题>__<发布时间>/
 # =========================
 RUNTIME_DIR = PROJECT_DIR / "程序运行文件夹"
@@ -202,8 +202,7 @@ def get_fixed_json_path(site_name: str, json_name: str) -> Path:
 
 
 def get_summary_path(site_name: str, json_name: str) -> Path:
-    docx_name = json_name.replace(".json", ".docx")
-    return get_summary_dir(site_name) / docx_name
+    return get_summary_dir(site_name) / json_name
 
 
 def get_db_path(site_name: str, json_name: str) -> Path:

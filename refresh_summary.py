@@ -3,10 +3,6 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Cm, Pt
-
 from config import (
     FIXED_JSON_DIR,
     SUMMARY_DIR,
@@ -47,15 +43,15 @@ def crawl_time_str(crawl_time: datetime) -> str:
 
 
 def crawl_time_file_str(crawl_time: datetime) -> str:
-    return crawl_time.strftime("%Y%m%d_%H%M%S")
+    return crawl_time.strftime("%Y-%m-%d_%H-%M-%S")
 
 
-def build_log_docx_name(page_url: str, crawl_time: datetime) -> str:
+def build_log_json_name(page_url: str, crawl_time: datetime) -> str:
     """
-    文档名：爬取的网址 + 爬取时间
+    文件名：爬取的网址 + 爬取时间
     """
     name = safe_name(f"{page_url}_{crawl_time_file_str(crawl_time)}")
-    return f"{name[:180]}.docx"
+    return f"{name[:180]}.json"
 
 
 # =========================================================
@@ -222,58 +218,53 @@ def build_crawl_log_rows_for_site(
     return sorted(rows_by_item_id.values(), key=sort_key, reverse=True)
 
 
-def save_crawl_log_docx(page_url: str, rows: list[dict], crawl_time: datetime) -> Path:
+def build_crawl_log_data(
+    page_url: str,
+    rows: list[dict],
+    crawl_time: datetime,
+    run_id: str | None = None,
+) -> dict:
     """
-    在爬取日志目录下直接生成 docx，不再按网站名创建子目录。
+    构建前端展示用的爬取日志数据。
     """
-    ensure_dir(SUMMARY_DIR)
-
-    log_path = SUMMARY_DIR / build_log_docx_name(page_url, crawl_time)
     done_count = sum(1 for row in rows if row["is_done"])
     pending_count = len(rows) - done_count
 
-    doc = Document()
-    section = doc.sections[0]
-    section.top_margin = Cm(2.0)
-    section.bottom_margin = Cm(2.0)
-    section.left_margin = Cm(2.0)
-    section.right_margin = Cm(2.0)
+    return {
+        "run_id": run_id,
+        "page_url": page_url,
+        "crawl_time": crawl_time_str(crawl_time),
+        "video_count": len(rows),
+        "done_count": done_count,
+        "pending_count": pending_count,
+        "videos": [
+            {
+                "title": row["title"],
+                "status": row["status"],
+                "docx_path": row["docx_path"],
+            }
+            for row in rows
+        ],
+    }
 
-    normal_style = doc.styles["Normal"]
-    normal_style.font.name = "Arial"
-    normal_style.font.size = Pt(10.5)
 
-    title = doc.add_paragraph()
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title_run = title.add_run("爬取日志")
-    title_run.bold = True
-    title_run.font.size = Pt(16)
+def save_crawl_log_json(
+    page_url: str,
+    rows: list[dict],
+    crawl_time: datetime,
+    run_id: str | None = None,
+) -> Path:
+    """
+    在爬取日志目录下直接生成 JSON，不再按网站名创建子目录。
+    """
+    ensure_dir(SUMMARY_DIR)
 
-    doc.add_paragraph(f"爬取网址：{page_url}")
-    doc.add_paragraph(f"爬取时间：{crawl_time_str(crawl_time)}")
-    doc.add_paragraph(f"视频总数：{len(rows)}，已完成：{done_count}，未完成：{pending_count}")
+    log_path = SUMMARY_DIR / build_log_json_name(page_url, crawl_time)
+    log_data = build_crawl_log_data(page_url, rows, crawl_time, run_id=run_id)
 
-    table = doc.add_table(rows=1, cols=3)
-    table.style = "Table Grid"
-    table.autofit = True
+    with open(log_path, "w", encoding="utf-8") as f:
+        json.dump(log_data, f, ensure_ascii=False, indent=2)
 
-    headers = table.rows[0].cells
-    headers[0].text = "视频标题"
-    headers[1].text = "是否完成爬取"
-    headers[2].text = "文档存储地址"
-
-    for cell in headers:
-        for paragraph in cell.paragraphs:
-            for run in paragraph.runs:
-                run.bold = True
-
-    for row_data in rows:
-        cells = table.add_row().cells
-        cells[0].text = row_data["title"]
-        cells[1].text = row_data["status"]
-        cells[2].text = row_data["docx_path"] or "未生成"
-
-    doc.save(log_path)
     print(f"[爬取日志] 已保存：{log_path}")
     return log_path
 
@@ -310,6 +301,7 @@ def refresh_summaries(
     target_page_urls: list[str] | None = None,
     target_site_names: list[str] | None = None,
     processed_item_ids_by_site: dict[str, list[str]] | None = None,
+    run_id: str | None = None,
 ) -> list[dict]:
     """
     刷新爬取日志：
@@ -340,8 +332,9 @@ def refresh_summaries(
                 site_name=site_name,
                 target_item_ids=target_item_ids,
             )
-            log_path = save_crawl_log_docx(page_url, rows, crawl_time)
+            log_path = save_crawl_log_json(page_url, rows, crawl_time, run_id=run_id)
             results.append({
+                "run_id": run_id,
                 "site_name": site_name,
                 "page_url": page_url,
                 "crawl_log_path": str(log_path),
@@ -352,6 +345,7 @@ def refresh_summaries(
             })
         except Exception as e:
             results.append({
+                "run_id": run_id,
                 "site_name": site_name,
                 "page_url": page_url,
                 "crawl_log_path": None,
