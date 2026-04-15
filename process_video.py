@@ -877,6 +877,7 @@ def process_one_video(
             record_video_event(conn, run_id, item_id, current_step, "SUCCESS", str(mp4_path))
 
         # 3) 提取 wav
+        current_step = STEP_AUDIO
         if existing_file(wav_path):
             audio_duration_ms, wav_size = get_audio_duration_ms_and_size(wav_path)
             update_video_record(
@@ -891,7 +892,6 @@ def process_one_video(
             record_video_event(conn, run_id, item_id, STEP_AUDIO, "SKIPPED", f"复用已有音频：{wav_path}")
             print(f"[SKIP] 已存在 wav，跳过音频提取: {wav_path}")
         else:
-            current_step = STEP_AUDIO
             record_video_event(conn, run_id, item_id, current_step, "START")
             mp4_to_wav(mp4_path, wav_path)
             audio_duration_ms, wav_size = get_audio_duration_ms_and_size(wav_path)

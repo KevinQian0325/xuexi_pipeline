@@ -150,8 +150,14 @@ def load_video_state_from_db(db_path: Path) -> dict[str, dict]:
             SELECT item_id, status, docx_path
             FROM videos
         """).fetchall()
-    except sqlite3.Error:
-        rows = []
+    except sqlite3.OperationalError as e:
+        if "no such table: videos" in str(e).lower():
+            print(f"[SUMMARY][WARN] 运行数据库缺少 videos 表，按未处理记录生成日志：{db_path}")
+            rows = []
+        else:
+            raise RuntimeError(f"读取运行数据库失败：{db_path} -> {e}") from e
+    except sqlite3.Error as e:
+        raise RuntimeError(f"读取运行数据库失败：{db_path} -> {e}") from e
     finally:
         conn.close()
 
