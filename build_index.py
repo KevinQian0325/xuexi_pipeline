@@ -14,6 +14,7 @@ from config import (
 VIDEO_EXTRA_COLUMNS = {
     "source_page_url": "TEXT",
     "source_json_name": "TEXT",
+    "channel_name": "TEXT",
     "material_dir": "TEXT",
     "attempt_count": "INTEGER DEFAULT 0",
     "last_run_id": "TEXT",
@@ -96,7 +97,36 @@ def is_video_record(d: dict) -> bool:
     return content_type == "shipin" or item_type == "kPureVideo"
 
 
-def extract_video_records(data: dict) -> list[dict]:
+def extract_matching_channel_name(d: dict, json_name: str) -> str:
+    """
+    从 JSON 条目中提取与 json 文件名对应的 channelName。
+    """
+    json_stem = Path(json_name).stem
+    channel_ids = d.get("channelIds")
+    channel_names = d.get("channelNames")
+
+    if isinstance(channel_ids, str):
+        channel_ids = [channel_ids]
+    if isinstance(channel_names, str):
+        channel_names = [channel_names]
+
+    if not isinstance(channel_ids, list) or not isinstance(channel_names, list):
+        return ""
+
+    normalized_channel_ids = [str(channel_id).strip() for channel_id in channel_ids]
+    normalized_channel_names = [str(channel_name).strip() for channel_name in channel_names]
+
+    for index, channel_id in enumerate(normalized_channel_ids):
+        if channel_id != json_stem:
+            continue
+        if index >= len(normalized_channel_names):
+            return ""
+        return normalized_channel_names[index]
+
+    return ""
+
+
+def extract_video_records(data: dict, json_name: str) -> list[dict]:
     """
     从固定 JSON 中提取视频记录
     """
@@ -116,6 +146,7 @@ def extract_video_records(data: dict) -> list[dict]:
         publish_time = str(d.get("publishTime", "")).strip()
         item_type = str(d.get("itemType", "")).strip()
         content_type = str(d.get("type", "")).strip()
+        channel_name = extract_matching_channel_name(d, json_name)
 
         records.append({
             "item_id": item_id,
@@ -124,6 +155,7 @@ def extract_video_records(data: dict) -> list[dict]:
             "publish_time": publish_time,
             "item_type": item_type,
             "content_type": content_type,
+            "channel_name": channel_name,
         })
 
     # 按 item_id 去重
@@ -279,10 +311,17 @@ def upsert_video_record(conn: sqlite3.Connection, record: dict) -> None:
     conn.execute("""
     UPDATE videos
     SET
-        source_json_name = COALESCE(source_json_name, ?)
+        source_json_name = COALESCE(source_json_name, ?),
+        channel_name = CASE
+            WHEN ? IS NOT NULL AND ? != '' THEN ?
+            ELSE channel_name
+        END
     WHERE item_id = ?
     """, (
         record.get("source_json_name"),
+        record.get("channel_name"),
+        record.get("channel_name"),
+        record.get("channel_name"),
         record["item_id"],
     ))
     conn.commit()
@@ -298,7 +337,7 @@ def build_index_for_one_json(site_name: str, json_name: str, json_path: Path) ->
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    records = extract_video_records(data)
+    records = extract_video_records(data, json_name)
 
     db_dir = get_db_dir(site_name)
     ensure_dir(db_dir)

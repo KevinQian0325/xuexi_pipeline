@@ -38,15 +38,27 @@ load_local_env(PROJECT_DIR / ".env")
 # 全部网站入口
 PAGE_URLS = [
     "https://www.xuexi.cn/a191dbc3067d516c3e2e17e2e08953d6/b87d700beee2c44826a9202c75d18c85.html",
+    "https://www.xuexi.cn/71a472c6203e03e49df7768d4d01ba31/b78fdcf1d588904b1965faf807264e6f.html",
+    "https://www.xuexi.cn/3960624581d7231cef96ba3ca43ec77c/d0fd85813f78b23f5e5399baa4304972.html"
 ]
 
 # 本次要处理哪些网站
 # None 表示处理全部网站
-TARGET_PAGE_URLS = None
+TARGET_PAGE_URLS = [
+    "https://www.xuexi.cn/3960624581d7231cef96ba3ca43ec77c/d0fd85813f78b23f5e5399baa4304972.html"
+]
+
+# 结果文件/结果文件/<一级文件夹> 的自定义名称接口
+# key 建议直接写页面网址，value 写你希望展示给用户看的名字
+# 例如：
+# MATERIALS_SITE_NAME_MAP = {
+#     "https://www.xuexi.cn/xxx.html": "人民心中的习近平",
+# }
+MATERIALS_SITE_NAME_MAP = {"https://www.xuexi.cn/3960624581d7231cef96ba3ca43ec77c/d0fd85813f78b23f5e5399baa4304972.html":"世界眼中的习近平"}
 
 # 时间范围筛选
-PROCESS_START_TIME = "2026-03-05 00:00:00"
-PROCESS_END_TIME = "2026-03-05 23:59:59"
+PROCESS_START_TIME = "2026-04-07 00:00:00"
+PROCESS_END_TIME = "2026-04-07 23:59:59"
 
 
 # =========================
@@ -119,7 +131,7 @@ SILENCE_THRESH_OFFSET_DB = 16                # 相对整体 dBFS 的静音阈值
 #
 # 结果文件夹/
 #   爬取日志/<爬取的网址>__<爬取时间>.json
-#   结果文件/<网站名>/<固定json>/<视频标题>__<发布时间>/
+#   结果文件/<用户自定义网站名>/<channelNames>/<视频标题>__<发布时间>/
 # =========================
 RUNTIME_DIR = PROJECT_DIR / "程序运行文件夹"
 RESULT_OUTPUT_DIR = PROJECT_DIR / "结果文件夹"
@@ -187,6 +199,18 @@ def page_url_to_site_name(page_url: str) -> str:
     return safe_name(page_url)
 
 
+def page_url_to_materials_site_name(page_url: str) -> str:
+    """
+    页面网址 -> 结果文件一级目录名
+    默认回退到清洗后的网址名；如果配置了 MATERIALS_SITE_NAME_MAP，
+    则优先使用用户自定义名字。
+    """
+    custom_name = MATERIALS_SITE_NAME_MAP.get(page_url)
+    if custom_name:
+        return safe_name(custom_name)
+    return page_url_to_site_name(page_url)
+
+
 def json_url_to_json_name(json_url: str) -> str:
     """
     固定 JSON URL -> 固定 JSON 文件名
@@ -220,7 +244,9 @@ def get_db_dir(site_name: str) -> Path:
     return DB_DIR / site_name
 
 
-def get_materials_site_dir(site_name: str) -> Path:
+def get_materials_site_dir(site_name: str, page_url: str | None = None) -> Path:
+    if page_url:
+        return MATERIALS_DIR / page_url_to_materials_site_name(page_url)
     return MATERIALS_DIR / site_name
 
 
@@ -237,10 +263,27 @@ def get_db_path(site_name: str, json_name: str) -> Path:
     return get_db_dir(site_name) / db_name
 
 
-def get_materials_json_dir(site_name: str, json_name: str) -> Path:
-    json_stem = json_name.replace(".json", "")
-    return get_materials_site_dir(site_name) / json_stem
+def get_materials_json_dir(
+    site_name: str,
+    json_name: str,
+    channel_name: str | None = None,
+    page_url: str | None = None,
+) -> Path:
+    folder_name = safe_name(channel_name) if channel_name else json_name.replace(".json", "")
+    return get_materials_site_dir(site_name, page_url=page_url) / folder_name
 
 
-def get_video_material_dir(site_name: str, json_name: str, title: str, publish_time: str) -> Path:
-    return get_materials_json_dir(site_name, json_name) / video_folder_name(title, publish_time)
+def get_video_material_dir(
+    site_name: str,
+    json_name: str,
+    title: str,
+    publish_time: str,
+    channel_name: str | None = None,
+    page_url: str | None = None,
+) -> Path:
+    return get_materials_json_dir(
+        site_name,
+        json_name,
+        channel_name=channel_name,
+        page_url=page_url,
+    ) / video_folder_name(title, publish_time)

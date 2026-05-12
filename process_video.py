@@ -769,7 +769,14 @@ def process_one_video(
     publish_time = row["publish_time"]
     detail_url = row["detail_url"]
 
-    material_dir = get_video_material_dir(site_name, json_name, title, publish_time)
+    material_dir = get_video_material_dir(
+        site_name,
+        json_name,
+        title,
+        publish_time,
+        channel_name=row["channel_name"],
+        page_url=page_url,
+    )
     ensure_dir(material_dir)
 
     mp4_path = material_dir / "视频.mp4"

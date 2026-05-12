@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
 import requests
@@ -122,6 +123,60 @@ def has_enough_valid_records(obj, threshold: int) -> tuple[bool, int]:
     return reached, count
 
 
+def resolve_matching_channel_name(record: dict, json_name: str) -> str:
+    """
+    在同一条记录内，找到与 json 文件名匹配的 channelId，
+    并返回同位置的 channelName。
+    """
+    json_stem = Path(json_name).stem
+    channel_ids = record.get("channelIds")
+    channel_names = record.get("channelNames")
+
+    if isinstance(channel_ids, str):
+        channel_ids = [channel_ids]
+    if isinstance(channel_names, str):
+        channel_names = [channel_names]
+
+    if not isinstance(channel_ids, list) or not isinstance(channel_names, list):
+        return ""
+
+    normalized_channel_ids = [str(channel_id).strip() for channel_id in channel_ids]
+    normalized_channel_names = [str(channel_name).strip() for channel_name in channel_names]
+
+    for index, channel_id in enumerate(normalized_channel_ids):
+        if channel_id != json_stem:
+            continue
+        if index >= len(normalized_channel_names):
+            return ""
+        return normalized_channel_names[index]
+
+    return ""
+
+
+def channel_ids_match_json_name(obj, json_name: str) -> tuple[bool, int, int]:
+    """
+    校验有效内容条目里，是否都能找到与 json 文件名匹配的 channelId，
+    且能取到同位置的 channelName。
+    返回：
+    - 是否匹配
+    - 有效内容条目数
+    - channelIds 不匹配的条目数
+    """
+    valid_record_count = 0
+    mismatch_count = 0
+
+    for item in flatten_json(obj):
+        if not is_valid_content_record(item):
+            continue
+
+        valid_record_count += 1
+        matched_channel_name = resolve_matching_channel_name(item, json_name)
+        if not matched_channel_name:
+            mismatch_count += 1
+
+    return mismatch_count == 0, valid_record_count, mismatch_count
+
+
 def discover_lgdata_candidates(page_url: str, headless: bool = True, wait_ms: int = 5000) -> list[str]:
     """
     打开网站页，监听所有 lgdata/*.json 请求
@@ -166,21 +221,38 @@ def collect_qualified_jsons(candidate_urls: list[str], threshold: int) -> list[d
             resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
             data = resp.json()
+            json_name = json_url_to_json_name(url)
 
             reached_threshold, valid_count = has_enough_valid_records(data, threshold)
+            channel_ids_matched, channel_check_count, mismatch_count = channel_ids_match_json_name(
+                obj=data,
+                json_name=json_name,
+            )
 
             print(f"[候选分析] {url}")
-            if reached_threshold:
-                print(f"  有效内容条目数已达到阈值：{valid_count}+")
-                print("  -> 满足阈值，加入保存列表")
-                qualified.append({
-                    "url": url,
-                    "valid_count": valid_count,
-                    "data": data,
-                })
-            else:
+            if not reached_threshold:
                 print(f"  有效内容条目数不足：{valid_count}")
                 print("  -> 不满足阈值，跳过")
+                continue
+
+            print(f"  有效内容条目数已达到阈值：{valid_count}+")
+
+            if not channel_ids_matched:
+                print(
+                    "  channelIds 与 json 文件名不一致："
+                    f"检查了 {channel_check_count} 条有效内容，"
+                    f"其中 {mismatch_count} 条不匹配"
+                )
+                print("  -> 不满足 channelIds 条件，跳过")
+                continue
+
+            print(f"  channelIds 校验通过：与 {json_name} 一致")
+            print("  -> 满足筛选条件，加入保存列表")
+            qualified.append({
+                "url": url,
+                "valid_count": valid_count,
+                "data": data,
+            })
 
         except Exception as e:
             print(f"[候选分析失败] {url} -> {e}")
