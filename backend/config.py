@@ -130,17 +130,36 @@ SILENCE_THRESH_OFFSET_DB = 16                # 相对整体 dBFS 的静音阈值
 #   json存储库/<网站名>/<固定json>.json
 #   运行数据库/<网站名>/<固定json>.db
 #
-# 结果文件夹/
+# 程序运行文件夹/
+#   json存储库/<网站名>/<固定json>.json
+#   运行数据库/<网站名>/<固定json>.db
 #   爬取日志/<爬取的网址>__<爬取时间>.json
+#
+# 结果文件存储根目录/
 #   结果文件/<用户自定义网站名>/<channelNames>/<视频标题>__<发布时间>/
 # =========================
 RUNTIME_DIR = PROJECT_DIR / "程序运行文件夹"
-RESULT_OUTPUT_DIR = PROJECT_DIR / "结果文件夹"
+
+
+def resolve_project_path(value: str | None, default_path: Path) -> Path:
+    if not value:
+        return default_path
+
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return PROJECT_DIR / path
+
+
+RESULT_STORAGE_ROOT_DIR = resolve_project_path(
+    os.getenv("XUEXI_RESULT_STORAGE_ROOT_DIR"),
+    PROJECT_DIR / "结果文件夹",
+)
 
 FIXED_JSON_DIR = RUNTIME_DIR / "json存储库"
 DB_DIR = RUNTIME_DIR / "运行数据库"
-SUMMARY_DIR = RESULT_OUTPUT_DIR / "爬取日志"
-MATERIALS_DIR = RESULT_OUTPUT_DIR / "结果文件"
+SUMMARY_DIR = RUNTIME_DIR / "爬取日志"
+MATERIALS_DIR = RESULT_STORAGE_ROOT_DIR / "结果文件"
 
 
 # =========================

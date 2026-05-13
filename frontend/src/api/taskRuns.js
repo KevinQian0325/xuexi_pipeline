@@ -1,4 +1,5 @@
 import { taskRuns as seedData } from "../mock/taskRuns"
+import { getEnvConfig } from "./envConfig"
 
 let runs = structuredClone(seedData)
 
@@ -58,16 +59,19 @@ export async function startListenerSiteRun(sites) {
   await delay(700)
 
   const now = nowString()
+  const envConfig = await getEnvConfig()
+  const resultStorageRoot = envConfig.resultFilesDir || "结果文件夹"
   const nextId = runs.reduce((maxId, item) => Math.max(maxId, item.id), 0) + 1
   const newRuns = sites.map((site, index) => {
     const totalCount = 3
-    const details = buildRunDetails(site, totalCount, now)
+    const resultDir = buildResultDir(resultStorageRoot, site.remark)
+    const details = buildRunDetails(site, totalCount, now, resultDir)
 
     return {
       id: nextId + index,
       remark: site.remark,
       pageUrl: site.pageUrl,
-      resultDir: `/Users/kevinqian/Documents/Code/Intern XuanRong Technology/xuexi_pipeline/结果文件夹/结果文件/${site.remark}`,
+      resultDir,
       status: "SUCCESS",
       successCount: totalCount,
       totalCount,
@@ -92,25 +96,39 @@ function buildDocxPath(run, item) {
   return `${run.resultDir}/${safeTitle}/文本.docx`
 }
 
-function buildRunDetails(site, count, executedAt) {
+function buildRunDetails(site, count, executedAt, resultDir) {
   return Array.from({ length: count }, (_, index) => {
     const itemNumber = index + 1
     const title = `${site.remark} 视频 ${itemNumber}`
     const itemId = `${site.id}-${Date.now()}-${itemNumber}`
     const detailUrl = `https://www.xuexi.cn/lgpage/detail/index.html?id=${itemId}&item_id=${itemId}`
-    const run = {
-      resultDir: `/Users/kevinqian/Documents/Code/Intern XuanRong Technology/xuexi_pipeline/结果文件夹/结果文件/${site.remark}`,
-    }
+    const run = { resultDir }
 
     return {
       id: itemId,
       title,
       detailUrl,
+      publishTime: buildPublishTime(site, itemNumber),
       executedAt,
       status: "DOCX_DONE",
       docxPath: buildDocxPath(run, { title }),
     }
   })
+}
+
+function buildResultDir(resultStorageRoot, remark) {
+  const normalizedRoot = String(resultStorageRoot).replace(/[\\/]+$/, "")
+  return `${normalizedRoot}/结果文件/${remark}`
+}
+
+function buildPublishTime(site, itemNumber) {
+  if (site.startDate) {
+    return `${site.startDate} ${String(itemNumber - 1).padStart(2, "0")}:00:00`
+  }
+  if (site.endDate) {
+    return `${site.endDate} ${String(itemNumber - 1).padStart(2, "0")}:00:00`
+  }
+  return "暂无"
 }
 
 function nowString() {

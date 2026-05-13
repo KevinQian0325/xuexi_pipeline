@@ -197,6 +197,7 @@
                 </td>
                 <td>
                   <a
+                    v-if="canEditServerPaths && row.resultDir"
                     class="view-button"
                     :href="toHref(row.resultDir)"
                     target="_blank"
@@ -204,6 +205,14 @@
                   >
                     查看
                   </a>
+                  <span
+                    v-else-if="row.resultDir"
+                    class="server-machine-text"
+                    :title="row.resultDir"
+                  >
+                    非服务器机器
+                  </span>
+                  <span v-else class="muted-text">暂无</span>
                 </td>
                 <td>
                   <span class="status-tag" :class="runStatusClass(row.status)">
@@ -276,6 +285,7 @@
     <EnvConfigModal
       v-if="modalState === 'env-config'"
       :initial-value="envConfig"
+      :can-edit-server-paths="canEditServerPaths"
       @close="closeModal"
       @submit="saveEnvConfig"
     />
@@ -300,6 +310,7 @@
       v-if="selectedTaskRun"
       :run="selectedTaskRun"
       :retrying="retryingRunId === selectedTaskRun.id"
+      :can-open-server-paths="canEditServerPaths"
       @close="selectedTaskRunId = null"
       @rerun-failed="rerunFailedVideos"
     />
@@ -323,12 +334,14 @@ import {
 import { getEnvConfig, updateEnvConfig } from "./api/envConfig"
 import { listTaskRuns, rerunFailedTaskVideos, startListenerSiteRun } from "./api/taskRuns"
 import { formatRunStatus } from "./utils/statusLabels"
+import { isServerHostAccess } from "./utils/serverAccess"
 
 const rows = ref([])
 const taskRows = ref([])
 const envConfig = ref({
   xuexiAppId: "",
   xuexiAccessToken: "",
+  resultFilesDir: "结果文件夹",
 })
 const keyword = ref("")
 const activeSection = ref("listener")
@@ -342,6 +355,7 @@ const currentPage = ref(1)
 const taskCurrentPage = ref(1)
 const pageSize = 6
 const taskPageSize = 6
+const canEditServerPaths = isServerHostAccess()
 
 const currentRow = computed(() =>
   rows.value.find((item) => item.id === currentRowId.value) ?? null,

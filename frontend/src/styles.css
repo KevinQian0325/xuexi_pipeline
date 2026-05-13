@@ -204,6 +204,13 @@ a {
   color: #94a3b8;
 }
 
+.secondary-button:disabled,
+.text-input:disabled {
+  cursor: not-allowed;
+  background: #f8fafc;
+  color: #94a3b8;
+}
+
 .secondary-button {
   background: #eef2f7;
   color: #475569;
@@ -342,6 +349,14 @@ a {
 
 .secondary-action-button {
   color: #475569;
+}
+
+.server-machine-text {
+  display: block;
+  max-width: 100%;
+  color: #64748b;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .status-pill {
@@ -687,6 +702,29 @@ a {
   font-weight: 600;
 }
 
+.config-divider {
+  height: 1px;
+  background: #edf1f5;
+}
+
+.config-section-title h4 {
+  margin: 0;
+  color: #1f2937;
+  font-size: 18px;
+}
+
+.config-section-title p {
+  margin: 4px 0 0;
+  color: #6b7280;
+  font-size: 14px;
+}
+
+.path-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
 .execution-table th:nth-child(1),
 .execution-table td:nth-child(1) {
   width: 78px;
@@ -786,16 +824,21 @@ a {
 
 .detail-table th:nth-child(3),
 .detail-table td:nth-child(3) {
-  width: 170px;
+  width: 190px;
 }
 
 .detail-table th:nth-child(4),
 .detail-table td:nth-child(4) {
-  width: 140px;
+  width: 170px;
 }
 
 .detail-table th:nth-child(5),
 .detail-table td:nth-child(5) {
+  width: 140px;
+}
+
+.detail-table th:nth-child(6),
+.detail-table td:nth-child(6) {
   width: 110px;
 }
 

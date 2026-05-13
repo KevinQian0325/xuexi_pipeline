@@ -33,6 +33,7 @@
           <tr>
             <th>视频名</th>
             <th>视频网站</th>
+            <th>视频发布时间</th>
             <th>执行时间</th>
             <th>状态</th>
             <th>文档地址</th>
@@ -48,6 +49,7 @@
                 {{ item.detailUrl }}
               </a>
             </td>
+            <td>{{ item.publishTime || "暂无" }}</td>
             <td>{{ item.executedAt }}</td>
             <td>
               <span class="status-tag" :class="statusView(item.status, run.status).className">
@@ -56,7 +58,7 @@
             </td>
             <td>
               <a
-                v-if="item.docxPath"
+                v-if="canOpenServerPaths && item.docxPath"
                 class="view-button"
                 :href="toHref(item.docxPath)"
                 target="_blank"
@@ -64,6 +66,13 @@
               >
                 查看
               </a>
+              <span
+                v-else-if="item.docxPath"
+                class="server-machine-text"
+                :title="item.docxPath"
+              >
+                非服务器机器
+              </span>
               <span v-else class="muted-text">暂无</span>
             </td>
           </tr>
@@ -86,6 +95,10 @@ const props = defineProps({
     required: true,
   },
   retrying: {
+    type: Boolean,
+    default: false,
+  },
+  canOpenServerPaths: {
     type: Boolean,
     default: false,
   },
