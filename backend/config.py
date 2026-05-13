@@ -27,7 +27,8 @@ def load_local_env(env_path: Path) -> None:
 # =========================
 # 1. 项目根目录
 # =========================
-PROJECT_DIR = Path(__file__).resolve().parent
+BACKEND_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = BACKEND_DIR.parent
 load_local_env(PROJECT_DIR / ".env")
 
 

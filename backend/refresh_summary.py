@@ -3,7 +3,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from config import (
+from backend.config import (
     FIXED_JSON_DIR,
     SUMMARY_DIR,
     STATUS_DOCX_DONE,

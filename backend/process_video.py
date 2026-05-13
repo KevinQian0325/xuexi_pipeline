@@ -18,7 +18,7 @@ from docx.shared import Cm, Pt, RGBColor
 from pydub import AudioSegment
 from pydub.silence import detect_silence
 
-from config import (
+from backend.config import (
     DB_DIR,
     APP_ID,
     ACCESS_TOKEN,
@@ -43,8 +43,8 @@ from config import (
     page_url_to_site_name,
     get_video_material_dir,
 )
-from capture_m3u8 import get_first_m3u8
-from build_index import create_table
+from backend.capture_m3u8 import get_first_m3u8
+from backend.build_index import create_table
 
 
 STEP_M3U8 = "M3U8_CAPTURE"
