@@ -1,24 +1,12 @@
-import { isServerHostAccess } from "../utils/serverAccess"
+import { request } from "./request"
 
-let envConfig = {
-  xuexiAppId: "",
-  xuexiAccessToken: "",
-  resultFilesDir: "结果文件夹",
+export function getEnvConfig() {
+  return request("/api/env-config")
 }
 
-const delay = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms))
-
-export async function getEnvConfig() {
-  await delay()
-  return { ...envConfig }
-}
-
-export async function updateEnvConfig(payload) {
-  await delay()
-  envConfig = {
-    xuexiAppId: payload.xuexiAppId,
-    xuexiAccessToken: payload.xuexiAccessToken,
-    resultFilesDir: isServerHostAccess() ? payload.resultFilesDir : envConfig.resultFilesDir,
-  }
-  return { message: "密钥配置已保存" }
+export function updateEnvConfig(payload) {
+  return request("/api/env-config", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  })
 }

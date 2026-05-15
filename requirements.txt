@@ -1,4 +1,7 @@
+audioop-lts
+fastapi
 playwright
 pydub
 python-docx
 requests
+uvicorn

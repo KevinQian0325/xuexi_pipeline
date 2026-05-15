@@ -69,7 +69,6 @@
               <span
                 v-else-if="item.docxPath"
                 class="server-machine-text"
-                :title="item.docxPath"
               >
                 非服务器机器
               </span>

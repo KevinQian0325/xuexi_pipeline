@@ -208,7 +208,6 @@
                   <span
                     v-else-if="row.resultDir"
                     class="server-machine-text"
-                    :title="row.resultDir"
                   >
                     非服务器机器
                   </span>
@@ -318,7 +317,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import EnvConfigModal from "./components/EnvConfigModal.vue"
 import ListenerSiteFormModal from "./components/ListenerSiteFormModal.vue"
 import TaskExecutionDetailModal from "./components/TaskExecutionDetailModal.vue"
@@ -387,6 +386,10 @@ onMounted(() => {
   loadEnvConfig()
 })
 
+onBeforeUnmount(() => {
+  clearTaskRefreshTimer()
+})
+
 watch(keyword, () => {
   currentPage.value = 1
   clearTimeout(searchTimer)
@@ -406,6 +409,7 @@ async function loadTaskRows() {
     taskCurrentPage.value,
     Math.max(1, Math.ceil(response.items.length / taskPageSize)),
   )
+  scheduleTaskRefreshIfRunning()
 }
 
 async function loadEnvConfig() {
@@ -420,7 +424,7 @@ async function createRow(payload) {
 
 async function saveEnvConfig(payload) {
   await updateEnvConfig(payload)
-  envConfig.value = payload
+  await loadEnvConfig()
   closeModal()
 }
 
@@ -564,4 +568,21 @@ function formatRange(startDate, endDate) {
 }
 
 let searchTimer = null
+let taskRefreshTimer = null
+
+function clearTaskRefreshTimer() {
+  if (taskRefreshTimer) {
+    clearTimeout(taskRefreshTimer)
+    taskRefreshTimer = null
+  }
+}
+
+function scheduleTaskRefreshIfRunning() {
+  clearTaskRefreshTimer()
+  if (!taskRows.value.some((item) => item.status === "RUNNING")) return
+
+  taskRefreshTimer = setTimeout(() => {
+    loadTaskRows()
+  }, 5000)
+}
 </script>
