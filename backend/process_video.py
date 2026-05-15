@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 import shutil
 
@@ -307,6 +308,66 @@ def update_crawl_log_path(db_path: Path, run_id: str, crawl_log_path: str) -> No
     ))
     conn.commit()
     conn.close()
+
+
+def reset_completed_videos_with_missing_docx(
+    conn: sqlite3.Connection,
+    start_time: str | None = None,
+    end_time: str | None = None,
+) -> list[str]:
+    """
+    如果数据库标记为已完成，但本地 Word 文件被手动删除，则重置为可重跑状态。
+    """
+    sql = """
+    SELECT item_id, docx_path
+    FROM videos
+    WHERE status = ?
+    """
+    params = [STATUS_DOCX_DONE]
+
+    if start_time:
+        sql += " AND publish_time >= ?"
+        params.append(start_time)
+
+    if end_time:
+        sql += " AND publish_time <= ?"
+        params.append(end_time)
+
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(sql, params).fetchall()
+    missing_item_ids = []
+
+    for row in rows:
+        docx_path = row["docx_path"]
+        if docx_path and existing_file(Path(docx_path)):
+            continue
+        missing_item_ids.append(row["item_id"])
+
+    if not missing_item_ids:
+        return []
+
+    placeholders = ",".join("?" for _ in missing_item_ids)
+    conn.execute(f"""
+    UPDATE videos
+    SET status = ?,
+        docx_path = '',
+        docx_done_at = NULL,
+        error_step = ?,
+        error_type = ?,
+        error_message = ?,
+        updated_at = ?
+    WHERE item_id IN ({placeholders})
+    """, (
+        STATUS_ASR_DONE,
+        STEP_DOCX,
+        "MissingOutputFile",
+        "数据库标记已完成，但本地 Word 文档不存在，已自动重置等待重跑。",
+        now_str(),
+        *missing_item_ids,
+    ))
+    conn.commit()
+
+    return missing_item_ids
 
 
 def load_pending_videos(
@@ -975,6 +1036,7 @@ def process_one_db(
     run_id: str | None = None,
     page_url: str | None = None,
     run_started_at: str | None = None,
+    on_progress: Callable[[dict], None] | None = None,
 ) -> dict:
     print("\n" + "#" * 100)
     print(f"开始处理 DB：{db_path}")
@@ -988,6 +1050,14 @@ def process_one_db(
     conn.row_factory = sqlite3.Row
     create_table(conn)
 
+    reset_item_ids = reset_completed_videos_with_missing_docx(
+        conn,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    if reset_item_ids:
+        print(f"[CHECK] 已重置缺失 Word 文档的视频数：{len(reset_item_ids)}")
+
     pending_rows = load_pending_videos(
         conn,
         start_time=start_time,
@@ -997,6 +1067,33 @@ def process_one_db(
     print(f"待处理视频数：{len(pending_rows)}")
 
     processed_item_ids = [row["item_id"] for row in pending_rows]
+    if on_progress:
+        on_progress({
+            "event": "db_start",
+            "site_name": site_name,
+            "json_name": json_name,
+            "db_path": str(db_path),
+            "total_count": len(pending_rows),
+            "processed_count": 0,
+            "success_count": 0,
+            "failed_count": 0,
+            "details": [
+                {
+                    "id": row["item_id"],
+                    "title": row["title"],
+                    "detailUrl": row["detail_url"],
+                    "publishTime": row["publish_time"] or "",
+                    "executedAt": run_started_at,
+                    "status": "PROCESSING",
+                    "docxPath": "",
+                    "errorStep": "",
+                    "errorType": "",
+                    "errorMessage": "",
+                }
+                for row in pending_rows
+            ],
+        })
+
     create_or_update_crawl_run(
         conn=conn,
         run_id=run_id,
@@ -1018,6 +1115,48 @@ def process_one_db(
             page_url=page_url,
         )
         final_statuses.append(final_status)
+        if on_progress:
+            updated_row = conn.execute("""
+            SELECT
+                item_id,
+                title,
+                detail_url,
+                publish_time,
+                last_processed_at,
+                status,
+                docx_path,
+                error_step,
+                error_type,
+                error_message
+            FROM videos
+            WHERE item_id = ?
+            """, (row["item_id"],)).fetchone()
+            on_progress({
+                "event": "video_done",
+                "site_name": site_name,
+                "json_name": json_name,
+                "db_path": str(db_path),
+                "item_id": row["item_id"],
+                "status": final_status,
+                "total_count": len(pending_rows),
+                "processed_count": len(final_statuses),
+                "success_count": sum(1 for status in final_statuses if status == STATUS_DOCX_DONE),
+                "failed_count": sum(1 for status in final_statuses if status == STATUS_FAILED),
+                "details": [
+                    {
+                        "id": updated_row["item_id"],
+                        "title": updated_row["title"],
+                        "detailUrl": updated_row["detail_url"],
+                        "publishTime": updated_row["publish_time"] or "",
+                        "executedAt": updated_row["last_processed_at"] or now_str(),
+                        "status": updated_row["status"],
+                        "docxPath": updated_row["docx_path"] or "",
+                        "errorStep": updated_row["error_step"] or "",
+                        "errorType": updated_row["error_type"] or "",
+                        "errorMessage": updated_row["error_message"] or "",
+                    }
+                ] if updated_row is not None else [],
+            })
 
     run_success_count = sum(1 for status in final_statuses if status == STATUS_DOCX_DONE)
     run_failed_count = sum(1 for status in final_statuses if status == STATUS_FAILED)
@@ -1070,6 +1209,7 @@ def process_sites(
     end_time: str | None = None,
     run_id: str | None = None,
     run_started_at: str | None = None,
+    on_progress: Callable[[dict], None] | None = None,
 ) -> list[dict]:
     """
     由 pipeline 调用：
@@ -1107,6 +1247,7 @@ def process_sites(
             run_id=run_id,
             page_url=page_url_by_site.get(site_name, site_name),
             run_started_at=run_started_at,
+            on_progress=on_progress,
         )
         results.append(result)
 

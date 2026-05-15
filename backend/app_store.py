@@ -1,7 +1,6 @@
 import os
 import sqlite3
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from backend import config
@@ -99,6 +98,12 @@ def connect() -> sqlite3.Connection:
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("""
+    CREATE TABLE IF NOT EXISTS app_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+    """)
+    conn.execute("""
     CREATE TABLE IF NOT EXISTS listener_sites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         remark TEXT NOT NULL,
@@ -148,36 +153,42 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         FOREIGN KEY (run_id) REFERENCES task_runs(id) ON DELETE CASCADE
     )
     """)
+    existing_detail_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(task_run_details)").fetchall()
+    }
+    for column_name, column_type in {
+        "error_step": "TEXT",
+        "error_type": "TEXT",
+        "error_message": "TEXT",
+    }.items():
+        if column_name not in existing_detail_columns:
+            conn.execute(f"ALTER TABLE task_run_details ADD COLUMN {column_name} {column_type}")
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_task_runs_executed_at ON task_runs(executed_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_task_run_details_run_id ON task_run_details(run_id)")
     conn.commit()
 
 
-def seed_defaults(conn: sqlite3.Connection) -> None:
-    site_count = conn.execute("SELECT COUNT(*) FROM listener_sites").fetchone()[0]
-    if site_count == 0:
-        for site in SEED_LISTENER_SITES:
-            conn.execute("""
-            INSERT INTO listener_sites (
-                remark,
-                page_url,
-                enabled,
-                start_date,
-                end_date,
-                created_at,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                site["remark"],
-                site["pageUrl"],
-                1 if site["enabled"] else 0,
-                site["startDate"],
-                site["endDate"],
-                site["updatedAt"],
-                site["updatedAt"],
-            ))
+def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute(
+        "SELECT value FROM app_meta WHERE key = ?",
+        (key,),
+    ).fetchone()
+    if row is None:
+        return None
+    return row["value"]
 
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute("""
+    INSERT INTO app_meta (key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    """, (key, value))
+
+
+def seed_defaults(conn: sqlite3.Connection) -> None:
     defaults = {
         "xuexiAppId": os.getenv("XUEXI_APP_ID", ""),
         "xuexiAccessToken": os.getenv("XUEXI_ACCESS_TOKEN", ""),
@@ -188,11 +199,6 @@ def seed_defaults(conn: sqlite3.Connection) -> None:
         INSERT OR IGNORE INTO env_config (key, value)
         VALUES (?, ?)
         """, (key, value))
-
-    task_run_count = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
-    if task_run_count == 0:
-        for run in default_task_runs():
-            insert_task_run(conn, run)
 
     conn.commit()
 
@@ -359,6 +365,9 @@ def row_to_task_run_detail(row: sqlite3.Row) -> dict[str, Any]:
         "executedAt": row["executed_at"],
         "status": row["status"],
         "docxPath": row["docx_path"] or "",
+        "errorStep": row["error_step"] or "",
+        "errorType": row["error_type"] or "",
+        "errorMessage": row["error_message"] or "",
     }
 
 
@@ -417,9 +426,12 @@ def insert_task_run(conn: sqlite3.Connection, run: dict[str, Any]) -> int:
             executed_at,
             status,
             docx_path,
+            error_step,
+            error_type,
+            error_message,
             sort_order
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             run_id,
             str(detail["id"]),
@@ -429,6 +441,9 @@ def insert_task_run(conn: sqlite3.Connection, run: dict[str, Any]) -> int:
             detail["executedAt"],
             detail["status"],
             detail.get("docxPath") or "",
+            detail.get("errorStep") or "",
+            detail.get("errorType") or "",
+            detail.get("errorMessage") or "",
             index,
         ))
 
@@ -446,6 +461,58 @@ def list_task_runs() -> list[dict[str, Any]]:
             row_to_task_run(row, load_task_run_details(conn, row["id"]))
             for row in rows
         ]
+
+
+def has_running_task_runs(run_ids: list[int] | None = None) -> bool:
+    params: list[int] = []
+    id_filter = ""
+    if run_ids:
+        placeholders = ",".join("?" for _ in run_ids)
+        id_filter = f" AND id IN ({placeholders})"
+        params = run_ids
+
+    with connect() as conn:
+        row = conn.execute(f"""
+        SELECT COUNT(*)
+        FROM task_runs
+        WHERE status = 'RUNNING'
+        {id_filter}
+        """, params).fetchone()
+    return int(row[0]) > 0
+
+
+def delete_task_runs(run_ids: list[int]) -> int:
+    normalized_ids = sorted({int(run_id) for run_id in run_ids})
+    if not normalized_ids:
+        return 0
+
+    placeholders = ",".join("?" for _ in normalized_ids)
+    with connect() as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM task_runs WHERE id IN ({placeholders})",
+            normalized_ids,
+        ).fetchone()
+        deleted_count = int(row[0])
+        conn.execute(
+            f"DELETE FROM task_run_details WHERE run_id IN ({placeholders})",
+            normalized_ids,
+        )
+        conn.execute(
+            f"DELETE FROM task_runs WHERE id IN ({placeholders})",
+            normalized_ids,
+        )
+        conn.commit()
+    return deleted_count
+
+
+def clear_task_runs() -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()
+        deleted_count = int(row[0])
+        conn.execute("DELETE FROM task_run_details")
+        conn.execute("DELETE FROM task_runs")
+        conn.commit()
+    return deleted_count
 
 
 def create_task_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -502,17 +569,10 @@ def update_task_run_summary(
         return cursor.rowcount > 0
 
 
-def replace_task_run_details(
+def upsert_task_run_progress_details(
     run_id: int | str,
     details: list[dict[str, Any]],
-    *,
-    status: str,
-    executed_at: str,
-    duration: str,
 ) -> dict[str, Any] | None:
-    success_count = sum(1 for detail in details if detail.get("status") == "DOCX_DONE")
-    total_count = len(details)
-
     with connect() as conn:
         run_row = conn.execute(
             "SELECT * FROM task_runs WHERE id = ?",
@@ -521,8 +581,28 @@ def replace_task_run_details(
         if run_row is None:
             return None
 
+        existing_details = load_task_run_details(conn, int(run_id))
+        merged_details_by_id = {
+            str(detail["id"]): detail
+            for detail in existing_details
+        }
+        for detail in details:
+            merged_details_by_id[str(detail["id"])] = detail
+
+        merged_details = []
+        seen_ids = set()
+        for detail in existing_details:
+            detail_id = str(detail["id"])
+            merged_details.append(merged_details_by_id[detail_id])
+            seen_ids.add(detail_id)
+
+        for detail in details:
+            detail_id = str(detail["id"])
+            if detail_id not in seen_ids:
+                merged_details.append(detail)
+
         conn.execute("DELETE FROM task_run_details WHERE run_id = ?", (run_id,))
-        for index, detail in enumerate(details, start=1):
+        for index, detail in enumerate(merged_details, start=1):
             conn.execute("""
             INSERT INTO task_run_details (
                 run_id,
@@ -533,9 +613,92 @@ def replace_task_run_details(
                 executed_at,
                 status,
                 docx_path,
+                error_step,
+                error_type,
+                error_message,
                 sort_order
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                run_id,
+                str(detail["id"]),
+                detail["title"],
+                detail["detailUrl"],
+                detail.get("publishTime"),
+                detail.get("executedAt") or now_string(),
+                detail["status"],
+                detail.get("docxPath") or "",
+                detail.get("errorStep") or "",
+                detail.get("errorType") or "",
+                detail.get("errorMessage") or "",
+                index,
+            ))
+        conn.commit()
+
+    return get_task_run(str(run_id))
+
+
+def replace_task_run_details(
+    run_id: int | str,
+    details: list[dict[str, Any]],
+    *,
+    status: str,
+    executed_at: str,
+    duration: str,
+) -> dict[str, Any] | None:
+    with connect() as conn:
+        run_row = conn.execute(
+            "SELECT * FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if run_row is None:
+            return None
+
+        existing_details = load_task_run_details(conn, int(run_id))
+        if existing_details:
+            merged_details_by_id = {
+                str(detail["id"]): detail
+                for detail in existing_details
+            }
+            for detail in details:
+                merged_details_by_id[str(detail["id"])] = detail
+
+            merged_details = []
+            seen_ids = set()
+            for detail in existing_details:
+                detail_id = str(detail["id"])
+                merged_details.append(merged_details_by_id[detail_id])
+                seen_ids.add(detail_id)
+
+            for detail in details:
+                detail_id = str(detail["id"])
+                if detail_id not in seen_ids:
+                    merged_details.append(detail)
+        else:
+            merged_details = details
+
+        success_count = sum(1 for detail in merged_details if detail.get("status") == "DOCX_DONE")
+        total_count = len(merged_details)
+        merged_status = calculate_task_run_status(success_count, total_count)
+
+        conn.execute("DELETE FROM task_run_details WHERE run_id = ?", (run_id,))
+        for index, detail in enumerate(merged_details, start=1):
+            conn.execute("""
+            INSERT INTO task_run_details (
+                run_id,
+                item_id,
+                title,
+                detail_url,
+                publish_time,
+                executed_at,
+                status,
+                docx_path,
+                error_step,
+                error_type,
+                error_message,
+                sort_order
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 run_id,
                 str(detail["id"]),
@@ -545,6 +708,9 @@ def replace_task_run_details(
                 detail.get("executedAt") or executed_at,
                 detail["status"],
                 detail.get("docxPath") or "",
+                detail.get("errorStep") or "",
+                detail.get("errorType") or "",
+                detail.get("errorMessage") or "",
                 index,
             ))
 
@@ -558,7 +724,7 @@ def replace_task_run_details(
             updated_at = ?
         WHERE id = ?
         """, (
-            status,
+            merged_status,
             success_count,
             total_count,
             executed_at,
@@ -571,6 +737,16 @@ def replace_task_run_details(
     return get_task_run(str(run_id))
 
 
+def calculate_task_run_status(success_count: int, total_count: int) -> str:
+    if total_count == 0:
+        return "SUCCESS"
+    if success_count == total_count:
+        return "SUCCESS"
+    if success_count > 0:
+        return "PARTIAL_FAILED"
+    return "FAILED"
+
+
 def get_task_run(run_id: str) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute(
@@ -580,66 +756,3 @@ def get_task_run(run_id: str) -> dict[str, Any] | None:
         if row is None:
             return None
         return row_to_task_run(row, load_task_run_details(conn, row["id"]))
-
-
-def rerun_failed_task_videos(run_id: str, executed_at: str) -> dict[str, Any] | None:
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM task_runs WHERE id = ?",
-            (run_id,),
-        ).fetchone()
-        if row is None:
-            return None
-
-        run = row_to_task_run(row, load_task_run_details(conn, row["id"]))
-        for detail in run["details"]:
-            if detail["status"] == "DOCX_DONE":
-                continue
-            docx_path = str(Path(run["resultDir"]) / safe_task_title(detail["title"]) / "文本.docx")
-            conn.execute("""
-            UPDATE task_run_details
-            SET status = 'DOCX_DONE',
-                executed_at = ?,
-                docx_path = ?
-            WHERE run_id = ? AND item_id = ?
-            """, (
-                executed_at,
-                docx_path,
-                row["id"],
-                detail["id"],
-            ))
-
-        total_count = conn.execute(
-            "SELECT COUNT(*) FROM task_run_details WHERE run_id = ?",
-            (row["id"],),
-        ).fetchone()[0]
-        success_count = conn.execute("""
-            SELECT COUNT(*)
-            FROM task_run_details
-            WHERE run_id = ? AND status = 'DOCX_DONE'
-        """, (row["id"],)).fetchone()[0]
-
-        conn.execute("""
-        UPDATE task_runs
-        SET status = ?,
-            success_count = ?,
-            total_count = ?,
-            executed_at = ?,
-            updated_at = ?
-        WHERE id = ?
-        """, (
-            "SUCCESS" if success_count == total_count else "PARTIAL_FAILED",
-            success_count,
-            total_count,
-            executed_at,
-            now_string(),
-            row["id"],
-        ))
-        conn.commit()
-
-    return get_task_run(run_id)
-
-
-def safe_task_title(title: str) -> str:
-    forbidden_chars = '/:*?"<>|\\'
-    return "".join("_" if char in forbidden_chars else char for char in str(title))

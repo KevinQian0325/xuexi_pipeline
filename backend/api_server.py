@@ -1,3 +1,4 @@
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,29 @@ class TaskRunStart(BaseModel):
     sites: list[dict[str, Any]]
 
 
+class TaskRunDelete(BaseModel):
+    ids: list[int]
+
+
+class OpenPathRequest(BaseModel):
+    path: str
+
+
+def resolve_open_target(raw_path: str) -> Path:
+    if not raw_path.strip():
+        raise HTTPException(status_code=400, detail="路径不能为空")
+
+    path = Path(raw_path).expanduser()
+    if path.exists():
+        return path if path.is_dir() else path.parent
+
+    parent = path.parent
+    if parent.exists():
+        return parent
+
+    raise HTTPException(status_code=404, detail="路径不存在")
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -142,6 +166,44 @@ def list_task_runs() -> dict[str, Any]:
     return {"items": with_index(items), "total": len(items)}
 
 
+@app.delete("/api/task-runs")
+def clear_task_runs() -> dict[str, Any]:
+    if app_store.has_running_task_runs():
+        raise HTTPException(status_code=409, detail="当前有运行中的任务，不能清除记录")
+
+    deleted_count = app_store.clear_task_runs()
+    return {"deletedCount": deleted_count, "message": "任务执行记录已清除"}
+
+
+@app.post("/api/task-runs/delete")
+def delete_task_runs(payload: TaskRunDelete) -> dict[str, Any]:
+    run_ids = sorted({int(run_id) for run_id in payload.ids})
+    if not run_ids:
+        raise HTTPException(status_code=400, detail="请选择要清除的记录")
+
+    if app_store.has_running_task_runs(run_ids):
+        raise HTTPException(status_code=409, detail="所选记录中有运行中的任务，不能清除")
+
+    deleted_count = app_store.delete_task_runs(run_ids)
+    return {"deletedCount": deleted_count, "message": "任务执行记录已清除"}
+
+
+@app.post("/api/open-path")
+def open_path(payload: OpenPathRequest, request: Request) -> dict[str, str]:
+    if not is_local_request(request):
+        raise HTTPException(status_code=403, detail="只能在服务器本机打开文件夹")
+
+    target_path = resolve_open_target(payload.path)
+    try:
+        subprocess.run(["open", str(target_path)], check=True)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail="当前系统不支持 open 命令") from exc
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(status_code=500, detail=f"打开路径失败：{target_path}") from exc
+
+    return {"message": "已打开", "path": str(target_path)}
+
+
 @app.post("/api/task-runs/start")
 def start_task_runs(payload: TaskRunStart, background_tasks: BackgroundTasks) -> dict[str, Any]:
     now = now_string()
@@ -172,9 +234,37 @@ def start_task_runs(payload: TaskRunStart, background_tasks: BackgroundTasks) ->
 
 
 @app.post("/api/task-runs/{run_id}/rerun-failed")
-def rerun_failed_task_videos(run_id: str) -> dict[str, Any]:
-    now = now_string()
-    run = app_store.rerun_failed_task_videos(run_id, executed_at=now)
+def rerun_failed_task_videos(run_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    run = app_store.get_task_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="任务记录不存在")
-    return {"item": run, "message": "失败视频已重新运行"}
+    if run["status"] == "RUNNING":
+        raise HTTPException(status_code=409, detail="任务仍在运行中")
+
+    failed_details = [
+        detail
+        for detail in run["details"]
+        if detail["status"] != "DOCX_DONE"
+    ]
+    if not failed_details:
+        raise HTTPException(status_code=400, detail="没有失败视频需要重新运行")
+
+    app_store.update_task_run_summary(
+        run_id,
+        status="RUNNING",
+        executed_at=now_string(),
+        duration="00:00:00",
+    )
+    background_tasks.add_task(
+        run_real_pipeline_for_task,
+        int(run["id"]),
+        {
+            "remark": run["remark"],
+            "pageUrl": run["pageUrl"],
+            "startDate": run.get("startDate"),
+            "endDate": run.get("endDate"),
+        },
+    )
+
+    updated_run = app_store.get_task_run(run_id)
+    return {"item": updated_run, "message": "失败视频重新运行任务已创建"}

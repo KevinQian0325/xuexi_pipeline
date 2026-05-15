@@ -5,6 +5,7 @@ export const VIDEO_STATUS_LABELS = {
   VIDEO_DONE: "已下载视频",
   AUDIO_DONE: "已提取音频",
   ASR_DONE: "已完成转写",
+  PROCESSING: "处理中",
   DOCX_DONE: "已生成文档",
   FAILED: "处理失败",
 }
@@ -16,7 +17,16 @@ export const VIDEO_FAILURE_LABELS = {
   VIDEO_DONE: "处理失败：音频提取失败",
   AUDIO_DONE: "处理失败：转写失败",
   ASR_DONE: "处理失败：文档生成失败",
+  PROCESSING: "处理失败：未完成",
   FAILED: "处理失败：运行异常",
+}
+
+export const VIDEO_FAILURE_STEP_LABELS = {
+  M3U8_CAPTURE: "处理失败：视频地址解析失败",
+  VIDEO_DOWNLOAD: "处理失败：视频下载失败",
+  AUDIO_EXTRACT: "处理失败：音频提取失败",
+  ASR_RECOGNIZE: "处理失败：转写失败",
+  DOCX_GENERATE: "处理失败：文档生成失败",
 }
 
 export const RUN_STATUS_LABELS = {
@@ -34,7 +44,7 @@ export function formatVideoCustomerStatus(status, runStatus) {
   return getVideoStatusView(status, runStatus).label
 }
 
-export function getVideoStatusView(status, runStatus) {
+export function getVideoStatusView(status, runStatus, errorStep = "") {
   if (status === "DOCX_DONE") {
     return {
       label: VIDEO_STATUS_LABELS.DOCX_DONE,
@@ -46,6 +56,13 @@ export function getVideoStatusView(status, runStatus) {
     return {
       label: formatVideoStatus(status),
       className: status === "NEW" ? "is-muted" : "is-progress",
+    }
+  }
+
+  if (status === "FAILED" && errorStep) {
+    return {
+      label: VIDEO_FAILURE_STEP_LABELS[errorStep] ?? VIDEO_FAILURE_LABELS.FAILED,
+      className: "is-error",
     }
   }
 

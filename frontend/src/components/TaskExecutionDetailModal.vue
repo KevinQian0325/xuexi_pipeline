@@ -53,19 +53,18 @@
             <td>{{ item.executedAt }}</td>
             <td>
               <span class="status-tag" :class="statusView(item.status, run.status).className">
-                {{ statusView(item.status, run.status).label }}
+                {{ statusView(item.status, run.status, item.errorStep).label }}
               </span>
             </td>
             <td>
-              <a
+              <button
                 v-if="canOpenServerPaths && item.docxPath"
                 class="view-button"
-                :href="toHref(item.docxPath)"
-                target="_blank"
-                rel="noreferrer"
+                type="button"
+                @click="$emit('open-path', item.docxPath)"
               >
                 查看
-              </a>
+              </button>
               <span
                 v-else-if="item.docxPath"
                 class="server-machine-text"
@@ -86,7 +85,7 @@ import { computed } from "vue"
 import BaseModal from "./BaseModal.vue"
 import { formatRunStatus, getVideoStatusView } from "../utils/statusLabels"
 
-defineEmits(["close", "rerun-failed"])
+defineEmits(["close", "open-path", "rerun-failed"])
 
 const props = defineProps({
   run: {
@@ -114,12 +113,8 @@ const retryButtonText = computed(() => {
   return "重新运行失败视频"
 })
 
-function statusView(status, runStatus) {
-  return getVideoStatusView(status, runStatus)
+function statusView(status, runStatus, errorStep) {
+  return getVideoStatusView(status, runStatus, errorStep)
 }
 
-function toHref(path) {
-  if (/^https?:\/\//i.test(path)) return path
-  return `file://${path}`
-}
 </script>

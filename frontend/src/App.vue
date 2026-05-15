@@ -65,7 +65,7 @@
             </div>
           </div>
 
-          <div class="table-wrapper compact-table-wrapper">
+          <div class="table-wrapper compact-table-wrapper listener-table-wrapper">
             <table class="site-table listener-table">
               <thead>
                 <tr>
@@ -168,13 +168,45 @@
               <h2>任务执行情况</h2>
               <p>每页最多显示 6 条网页任务</p>
             </div>
+            <div class="section-actions">
+              <button
+                v-if="!taskDeleteMode"
+                class="quiet-danger-button"
+                type="button"
+                :disabled="taskRows.length === 0 || hasRunningTask"
+                @click="enterTaskDeleteMode"
+              >
+                清除记录
+              </button>
+              <template v-else>
+                <button
+                  class="secondary-button compact-action-button"
+                  type="button"
+                  @click="cancelTaskDeleteMode"
+                >
+                  取消
+                </button>
+                <button
+                  class="quiet-danger-button"
+                  type="button"
+                  :disabled="selectedTaskRunIds.length === 0"
+                  @click="deleteSelectedTaskRunRecords"
+                >
+                  清除所选 {{ selectedTaskRunIds.length }}
+                </button>
+              </template>
+            </div>
+          </div>
+
+          <div v-if="taskDeleteMode" class="selection-hint">
+            请选择要清除的执行记录。清除后不会删除结果文件、运行数据库和爬取日志。
           </div>
 
           <div class="table-wrapper compact-table-wrapper">
           <table class="site-table execution-table">
             <thead>
               <tr>
-                <th>序号</th>
+                <th>{{ taskDeleteMode ? "选择" : "序号" }}</th>
                 <th>备注</th>
                 <th>网页地址</th>
                 <th>结果目录</th>
@@ -186,7 +218,19 @@
             </thead>
             <tbody v-if="taskRows.length > 0">
               <tr v-for="row in pagedTaskRows" :key="row.id">
-                <td>{{ row.index }}</td>
+                <td>
+                  <button
+                    v-if="taskDeleteMode"
+                    class="selection-box"
+                    :class="{ 'is-selected': selectedTaskRunIds.includes(row.id) }"
+                    type="button"
+                    :aria-label="`选择第 ${row.index} 条记录`"
+                    @click="toggleTaskRunSelection(row.id)"
+                  >
+                    <span v-if="selectedTaskRunIds.includes(row.id)">✓</span>
+                  </button>
+                  <template v-else>{{ row.index }}</template>
+                </td>
                 <td>
                   <strong>{{ row.remark }}</strong>
                 </td>
@@ -196,15 +240,14 @@
                   </a>
                 </td>
                 <td>
-                  <a
+                  <button
                     v-if="canEditServerPaths && row.resultDir"
                     class="view-button"
-                    :href="toHref(row.resultDir)"
-                    target="_blank"
-                    rel="noreferrer"
+                    type="button"
+                    @click="openResultDir(row.resultDir)"
                   >
                     查看
-                  </a>
+                  </button>
                   <span
                     v-else-if="row.resultDir"
                     class="server-machine-text"
@@ -311,6 +354,7 @@
       :retrying="retryingRunId === selectedTaskRun.id"
       :can-open-server-paths="canEditServerPaths"
       @close="selectedTaskRunId = null"
+      @open-path="openResultDir"
       @rerun-failed="rerunFailedVideos"
     />
   </div>
@@ -331,7 +375,8 @@ import {
   updateListenerSiteTimeRange,
 } from "./api/listenerSites"
 import { getEnvConfig, updateEnvConfig } from "./api/envConfig"
-import { listTaskRuns, rerunFailedTaskVideos, startListenerSiteRun } from "./api/taskRuns"
+import { openServerPath } from "./api/localPaths"
+import { deleteTaskRuns, listTaskRuns, rerunFailedTaskVideos, startListenerSiteRun } from "./api/taskRuns"
 import { formatRunStatus } from "./utils/statusLabels"
 import { isServerHostAccess } from "./utils/serverAccess"
 
@@ -350,6 +395,8 @@ const currentRowId = ref(null)
 const selectedTaskRunId = ref(null)
 const retryingRunId = ref(null)
 const runningSites = ref(false)
+const taskDeleteMode = ref(false)
+const selectedTaskRunIds = ref([])
 const currentPage = ref(1)
 const taskCurrentPage = ref(1)
 const pageSize = 6
@@ -362,6 +409,10 @@ const currentRow = computed(() =>
 
 const selectedTaskRun = computed(() =>
   taskRows.value.find((item) => item.id === selectedTaskRunId.value) ?? null,
+)
+
+const hasRunningTask = computed(() =>
+  taskRows.value.some((item) => item.status === "RUNNING"),
 )
 
 const totalPages = computed(() => Math.max(1, Math.ceil(rows.value.length / pageSize)))
@@ -405,6 +456,12 @@ async function loadRows() {
 async function loadTaskRows() {
   const response = await listTaskRuns()
   taskRows.value = response.items
+  selectedTaskRunIds.value = selectedTaskRunIds.value.filter((id) =>
+    response.items.some((item) => item.id === id),
+  )
+  if (response.items.length === 0) {
+    taskDeleteMode.value = false
+  }
   taskCurrentPage.value = Math.min(
     taskCurrentPage.value,
     Math.max(1, Math.ceil(response.items.length / taskPageSize)),
@@ -460,7 +517,7 @@ async function removeRow(id) {
 }
 
 async function runEnabledSites() {
-  if (runningSites.value || taskRows.value.some((item) => item.status === "RUNNING")) {
+  if (runningSites.value || hasRunningTask.value) {
     window.alert("当前已有运行中的任务，请等待任务完成后再运行。")
     return
   }
@@ -548,16 +605,63 @@ async function rerunFailedVideos(runId) {
   }
 }
 
+function enterTaskDeleteMode() {
+  if (hasRunningTask.value) {
+    window.alert("当前有运行中的任务，请等待任务完成后再清除记录。")
+    return
+  }
+
+  taskDeleteMode.value = true
+  selectedTaskRunIds.value = []
+}
+
+function cancelTaskDeleteMode() {
+  taskDeleteMode.value = false
+  selectedTaskRunIds.value = []
+}
+
+function toggleTaskRunSelection(id) {
+  if (selectedTaskRunIds.value.includes(id)) {
+    selectedTaskRunIds.value = selectedTaskRunIds.value.filter((item) => item !== id)
+    return
+  }
+
+  selectedTaskRunIds.value = [...selectedTaskRunIds.value, id]
+}
+
+async function deleteSelectedTaskRunRecords() {
+  if (selectedTaskRunIds.value.length === 0) return
+  if (hasRunningTask.value) {
+    window.alert("当前有运行中的任务，请等待任务完成后再清除记录。")
+    return
+  }
+
+  const confirmed = window.confirm(
+    `将清除 ${selectedTaskRunIds.value.length} 条任务执行记录，不会删除结果文件、运行数据库和爬取日志。是否继续？`,
+  )
+  if (!confirmed) return
+
+  await deleteTaskRuns(selectedTaskRunIds.value)
+  selectedTaskRunId.value = null
+  selectedTaskRunIds.value = []
+  taskDeleteMode.value = false
+  clearTaskRefreshTimer()
+  await loadTaskRows()
+}
+
+async function openResultDir(path) {
+  try {
+    await openServerPath(path)
+  } catch (error) {
+    window.alert(error.message || "打开文件夹失败。")
+  }
+}
+
 function runStatusClass(status) {
   if (status === "SUCCESS") return "is-success"
   if (status === "FAILED") return "is-error"
   if (status === "PARTIAL_FAILED") return "is-warning"
   return "is-progress"
-}
-
-function toHref(path) {
-  if (/^https?:\/\//i.test(path)) return path
-  return `file://${path}`
 }
 
 function formatRange(startDate, endDate) {

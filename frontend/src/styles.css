@@ -186,6 +186,22 @@ a {
   font-weight: 700;
 }
 
+.quiet-danger-button {
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid #fecdd3;
+  border-radius: 8px;
+  background: #fff7f8;
+  color: #be123c;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.compact-action-button {
+  height: 36px;
+  padding: 0 14px;
+}
+
 .config-button {
   width: 40px;
   height: 40px;
@@ -202,6 +218,13 @@ a {
   border-color: #d7dce3;
   background: #f1f5f9;
   color: #94a3b8;
+}
+
+.quiet-danger-button:disabled {
+  cursor: not-allowed;
+  border-color: #e5e7eb;
+  background: #f8fafc;
+  color: #cbd5e1;
 }
 
 .secondary-button:disabled,
@@ -225,6 +248,37 @@ a {
 
 .compact-table-wrapper {
   margin-top: 10px;
+}
+
+.selection-hint {
+  margin-top: 10px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.selection-box {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.selection-box.is-selected {
+  border-color: #c91835;
+  background: #c91835;
+}
+
+.listener-table-wrapper {
+  overflow: visible;
 }
 
 .pagination-bar {
