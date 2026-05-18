@@ -132,6 +132,8 @@ def load_task_details_from_process_results(process_results: list[dict[str, Any]]
                     publish_time,
                     last_processed_at,
                     status,
+                    mp4_path,
+                    wav_path,
                     docx_path,
                     error_step,
                     error_type,
@@ -151,6 +153,8 @@ def load_task_details_from_process_results(process_results: list[dict[str, Any]]
                 "publishTime": row["publish_time"] or "",
                 "executedAt": row["last_processed_at"] or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "status": row["status"],
+                "mp4Path": row["mp4_path"] or "",
+                "wavPath": row["wav_path"] or "",
                 "docxPath": row["docx_path"] or "",
                 "errorStep": row["error_step"] or "",
                 "errorType": row["error_type"] or "",
@@ -164,8 +168,20 @@ def calculate_run_status(details: list[dict[str, Any]]) -> str:
     if not details:
         return "SUCCESS"
 
-    success_count = sum(1 for detail in details if detail.get("status") == "DOCX_DONE")
-    if success_count == len(details):
+    counted_details = [
+        detail
+        for detail in details
+        if detail.get("status") != "EXISTING"
+    ]
+    if not counted_details:
+        return "SUCCESS"
+
+    success_count = sum(
+        1
+        for detail in counted_details
+        if detail.get("status") in {"DOCX_DONE", "IGNORED"}
+    )
+    if success_count == len(counted_details):
         return "SUCCESS"
     if success_count > 0:
         return "PARTIAL_FAILED"
@@ -243,6 +259,7 @@ def run_real_pipeline_for_task(app_run_id: int, site: dict[str, Any]) -> None:
             run_id=pipeline_run_id,
             run_started_at=executed_at,
             on_progress=update_task_progress,
+            target_item_ids=site.get("itemIds"),
         )
         write_pipeline_log(
             f"PROCESS_VIDEO_DONE app_run_id={app_run_id} results={process_results}"

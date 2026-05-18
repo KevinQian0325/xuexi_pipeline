@@ -11,9 +11,9 @@
             <label class="search-box">
               <span>⌕</span>
               <input
-                v-model.trim="keyword"
+                v-model.trim="activeSearchKeyword"
                 type="search"
-                placeholder="搜索备注或网页地址..."
+                :placeholder="searchPlaceholder"
               />
             </label>
           </div>
@@ -50,6 +50,9 @@
                 @click="openEnvConfigModal"
               >
                 ⚙
+              </button>
+              <button class="secondary-button" type="button" @click="openIntegrityCheckModal">
+                文件检查
               </button>
               <button class="primary-button" type="button" @click="openCreateModal">
                 新增
@@ -140,16 +143,18 @@
               上一页
             </button>
 
-            <button
-              v-for="page in totalPages"
-              :key="page"
-              class="page-button"
-              :class="{ 'is-active': page === currentPage }"
-              type="button"
-              @click="goToPage(page)"
-            >
-              {{ page }}
-            </button>
+            <template v-for="page in paginationItems" :key="page">
+              <button
+                v-if="typeof page === 'number'"
+                class="page-button"
+                :class="{ 'is-active': page === currentPage }"
+                type="button"
+                @click="goToPage(page)"
+              >
+                {{ page }}
+              </button>
+              <span v-else class="page-ellipsis">...</span>
+            </template>
 
             <button
               class="page-button"
@@ -159,6 +164,18 @@
             >
               下一页
             </button>
+
+            <form class="page-jump-form" @submit.prevent="jumpToPage">
+              <span>跳至</span>
+              <input
+                v-model="pageJump"
+                type="number"
+                min="1"
+                :max="totalPages"
+                aria-label="跳转页码"
+              />
+              <button class="page-button" type="submit">确定</button>
+            </form>
           </div>
         </div>
 
@@ -187,12 +204,28 @@
                   取消
                 </button>
                 <button
+                  class="secondary-button compact-action-button"
+                  type="button"
+                  :disabled="pagedTaskRows.length === 0"
+                  @click="toggleCurrentTaskPageSelection"
+                >
+                  {{ currentTaskPageAllSelected ? "取消全选" : "全选" }}
+                </button>
+                <button
                   class="quiet-danger-button"
                   type="button"
                   :disabled="selectedTaskRunIds.length === 0"
                   @click="deleteSelectedTaskRunRecords"
                 >
                   清除所选 {{ selectedTaskRunIds.length }}
+                </button>
+                <button
+                  class="quiet-danger-button"
+                  type="button"
+                  :disabled="taskRows.length === 0 || hasRunningTask"
+                  @click="clearAllTaskRunRecords"
+                >
+                  清除全部
                 </button>
               </template>
             </div>
@@ -216,7 +249,7 @@
                 <th>详情</th>
               </tr>
             </thead>
-            <tbody v-if="taskRows.length > 0">
+            <tbody v-if="filteredTaskRows.length > 0">
               <tr v-for="row in pagedTaskRows" :key="row.id">
                 <td>
                   <button
@@ -257,9 +290,14 @@
                   <span v-else class="muted-text">暂无</span>
                 </td>
                 <td>
-                  <span class="status-tag" :class="runStatusClass(row.status)">
-                    {{ formatRunStatus(row.status) }} {{ row.successCount }}/{{ row.totalCount }} 条
-                  </span>
+                  <div class="run-status-cell">
+                    <span class="status-tag" :class="runStatusClass(row.status)">
+                      {{ formatRunProgress(row.status, row.successCount, row.totalCount) }}
+                    </span>
+                    <span v-if="existingVideoCount(row) > 0" class="existing-summary-tag">
+                      已存在 {{ existingVideoCount(row) }} 条
+                    </span>
+                  </div>
                 </td>
                 <td>{{ row.executedAt }}</td>
                 <td>{{ row.duration }}</td>
@@ -274,8 +312,14 @@
               <tr>
                 <td colspan="8">
                   <div class="empty-state">
-                    <p>暂无执行记录</p>
-                    <small>运行爬取任务后会在这里查看每个网页的执行情况。</small>
+                    <p>{{ taskRows.length > 0 ? "暂无匹配记录" : "暂无执行记录" }}</p>
+                    <small>
+                      {{
+                        taskRows.length > 0
+                          ? "可以换一个备注或网页地址关键词再试。"
+                          : "运行爬取任务后会在这里查看每个网页的执行情况。"
+                      }}
+                    </small>
                   </div>
                 </td>
               </tr>
@@ -293,16 +337,18 @@
               上一页
             </button>
 
-            <button
-              v-for="page in taskTotalPages"
-              :key="page"
-              class="page-button"
-              :class="{ 'is-active': page === taskCurrentPage }"
-              type="button"
-              @click="goToTaskPage(page)"
-            >
-              {{ page }}
-            </button>
+            <template v-for="page in taskPaginationItems" :key="page">
+              <button
+                v-if="typeof page === 'number'"
+                class="page-button"
+                :class="{ 'is-active': page === taskCurrentPage }"
+                type="button"
+                @click="goToTaskPage(page)"
+              >
+                {{ page }}
+              </button>
+              <span v-else class="page-ellipsis">...</span>
+            </template>
 
             <button
               class="page-button"
@@ -312,6 +358,18 @@
             >
               下一页
             </button>
+
+            <form class="page-jump-form" @submit.prevent="jumpToTaskPage">
+              <span>跳至</span>
+              <input
+                v-model="taskPageJump"
+                type="number"
+                min="1"
+                :max="taskTotalPages"
+                aria-label="跳转任务页码"
+              />
+              <button class="page-button" type="submit">确定</button>
+            </form>
           </div>
         </div>
       </section>
@@ -330,6 +388,12 @@
       :can-edit-server-paths="canEditServerPaths"
       @close="closeModal"
       @submit="saveEnvConfig"
+    />
+
+    <FileIntegrityCheckModal
+      v-if="modalState === 'integrity-check'"
+      :sites="integrityCheckSites"
+      @close="closeModal"
     />
 
     <ListenerSiteFormModal
@@ -356,6 +420,8 @@
       @close="selectedTaskRunId = null"
       @open-path="openResultDir"
       @rerun-failed="rerunFailedVideos"
+      @rerun-videos="rerunSelectedFailedVideos"
+      @ignore-videos="ignoreFailedVideos"
     />
   </div>
 </template>
@@ -363,6 +429,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import EnvConfigModal from "./components/EnvConfigModal.vue"
+import FileIntegrityCheckModal from "./components/FileIntegrityCheckModal.vue"
 import ListenerSiteFormModal from "./components/ListenerSiteFormModal.vue"
 import TaskExecutionDetailModal from "./components/TaskExecutionDetailModal.vue"
 import TimeRangeModal from "./components/TimeRangeModal.vue"
@@ -376,18 +443,21 @@ import {
 } from "./api/listenerSites"
 import { getEnvConfig, updateEnvConfig } from "./api/envConfig"
 import { openServerPath } from "./api/localPaths"
-import { deleteTaskRuns, listTaskRuns, rerunFailedTaskVideos, startListenerSiteRun } from "./api/taskRuns"
-import { formatRunStatus } from "./utils/statusLabels"
+import { clearTaskRuns, deleteTaskRuns, ignoreTaskRunVideos, listTaskRuns, rerunFailedTaskVideos, rerunTaskRunVideos, startListenerSiteRun } from "./api/taskRuns"
+import { formatRunProgress } from "./utils/statusLabels"
+import { buildPaginationItems, clampPage } from "./utils/pagination"
 import { isServerHostAccess } from "./utils/serverAccess"
 
 const rows = ref([])
 const taskRows = ref([])
+const integrityCheckSites = ref([])
 const envConfig = ref({
   xuexiAppId: "",
   xuexiAccessToken: "",
-  resultFilesDir: "结果文件夹",
+  resultFilesDir: "",
 })
-const keyword = ref("")
+const listenerKeyword = ref("")
+const taskKeyword = ref("")
 const activeSection = ref("listener")
 const activeMenuId = ref(null)
 const modalState = ref(null)
@@ -399,6 +469,8 @@ const taskDeleteMode = ref(false)
 const selectedTaskRunIds = ref([])
 const currentPage = ref(1)
 const taskCurrentPage = ref(1)
+const pageJump = ref("")
+const taskPageJump = ref("")
 const pageSize = 6
 const taskPageSize = 6
 const canEditServerPaths = isServerHostAccess()
@@ -415,7 +487,44 @@ const hasRunningTask = computed(() =>
   taskRows.value.some((item) => item.status === "RUNNING"),
 )
 
+const activeSearchKeyword = computed({
+  get() {
+    return activeSection.value === "tasks" ? taskKeyword.value : listenerKeyword.value
+  },
+  set(value) {
+    if (activeSection.value === "tasks") {
+      taskKeyword.value = value
+      return
+    }
+    listenerKeyword.value = value
+  },
+})
+
+const searchPlaceholder = computed(() =>
+  activeSection.value === "tasks"
+    ? "搜索任务备注或网页地址..."
+    : "搜索监听备注或网页地址...",
+)
+
+const filteredTaskRows = computed(() => {
+  const value = taskKeyword.value.trim().toLowerCase()
+  if (!value) return taskRows.value
+
+  return taskRows.value.filter((item) =>
+    (item.remark || "").toLowerCase().includes(value) ||
+    (item.pageUrl || "").toLowerCase() === value,
+  )
+})
+
+function existingVideoCount(row) {
+  return (row.details || []).filter((detail) => detail.status === "EXISTING").length
+}
+
 const totalPages = computed(() => Math.max(1, Math.ceil(rows.value.length / pageSize)))
+
+const paginationItems = computed(() =>
+  buildPaginationItems(currentPage.value, totalPages.value),
+)
 
 const pagedRows = computed(() => {
   const start = (currentPage.value - 1) * pageSize
@@ -423,13 +532,22 @@ const pagedRows = computed(() => {
 })
 
 const taskTotalPages = computed(() =>
-  Math.max(1, Math.ceil(taskRows.value.length / taskPageSize)),
+  Math.max(1, Math.ceil(filteredTaskRows.value.length / taskPageSize)),
+)
+
+const taskPaginationItems = computed(() =>
+  buildPaginationItems(taskCurrentPage.value, taskTotalPages.value),
 )
 
 const pagedTaskRows = computed(() => {
   const start = (taskCurrentPage.value - 1) * taskPageSize
-  return taskRows.value.slice(start, start + taskPageSize)
+  return filteredTaskRows.value.slice(start, start + taskPageSize)
 })
+
+const currentTaskPageAllSelected = computed(() =>
+  pagedTaskRows.value.length > 0 &&
+  pagedTaskRows.value.every((row) => selectedTaskRunIds.value.includes(row.id)),
+)
 
 onMounted(() => {
   loadRows()
@@ -441,14 +559,22 @@ onBeforeUnmount(() => {
   clearTaskRefreshTimer()
 })
 
-watch(keyword, () => {
+watch(listenerKeyword, () => {
   currentPage.value = 1
   clearTimeout(searchTimer)
   searchTimer = setTimeout(loadRows, 180)
 })
 
+watch(taskKeyword, () => {
+  taskCurrentPage.value = 1
+})
+
+watch(filteredTaskRows, () => {
+  taskCurrentPage.value = Math.min(taskCurrentPage.value, taskTotalPages.value)
+})
+
 async function loadRows() {
-  const response = await listListenerSites(keyword.value)
+  const response = await listListenerSites(listenerKeyword.value)
   rows.value = response.items
   currentPage.value = Math.min(currentPage.value, Math.max(1, Math.ceil(response.items.length / pageSize)))
 }
@@ -480,9 +606,26 @@ async function createRow(payload) {
 }
 
 async function saveEnvConfig(payload) {
-  await updateEnvConfig(payload)
-  await loadEnvConfig()
-  closeModal()
+  const oldRoot = (envConfig.value.resultFilesDir || "").trim()
+  const nextRoot = (payload.resultFilesDir || "").trim()
+  if (oldRoot && nextRoot && oldRoot !== nextRoot) {
+    const confirmed = window.confirm(
+      "更改保存根目录会迁移全部历史结果文件，并更新数据库中的文件路径。迁移期间请不要运行任务。是否继续？",
+    )
+    if (!confirmed) return
+  }
+
+  try {
+    const response = await updateEnvConfig(payload)
+    await loadEnvConfig()
+    await loadTaskRows()
+    closeModal()
+    if (response?.migration?.changed) {
+      window.alert("保存根目录已迁移完成，历史文件路径已同步更新。")
+    }
+  } catch (error) {
+    window.alert(error.message || "保存配置失败。")
+  }
 }
 
 async function updateRemark(payload) {
@@ -524,8 +667,8 @@ async function runEnabledSites() {
 
   const latestEnvConfig = await getEnvConfig()
   envConfig.value = latestEnvConfig
-  if (!latestEnvConfig.xuexiAppId || !latestEnvConfig.xuexiAccessToken) {
-    window.alert("请先配置密钥。")
+  if (!latestEnvConfig.xuexiAppId || !latestEnvConfig.xuexiAccessToken || !latestEnvConfig.resultFilesDir) {
+    window.alert("请先配置 XUEXI_APP_ID、XUEXI_ACCESS_TOKEN 和结果文件存储根目录。")
     openEnvConfigModal()
     return
   }
@@ -562,6 +705,12 @@ function openEnvConfigModal() {
   modalState.value = "env-config"
 }
 
+async function openIntegrityCheckModal() {
+  const response = await listListenerSites("")
+  integrityCheckSites.value = response.items
+  modalState.value = "integrity-check"
+}
+
 function openRemarkModal(row) {
   currentRowId.value = row.id
   activeMenuId.value = null
@@ -584,11 +733,23 @@ function toggleMenu(id) {
 }
 
 function goToPage(page) {
-  currentPage.value = page
+  currentPage.value = clampPage(page, totalPages.value)
 }
 
 function goToTaskPage(page) {
-  taskCurrentPage.value = page
+  taskCurrentPage.value = clampPage(page, taskTotalPages.value)
+}
+
+function jumpToPage() {
+  if (pageJump.value === "") return
+  goToPage(pageJump.value)
+  pageJump.value = ""
+}
+
+function jumpToTaskPage() {
+  if (taskPageJump.value === "") return
+  goToTaskPage(taskPageJump.value)
+  taskPageJump.value = ""
 }
 
 function openTaskDetail(row) {
@@ -599,6 +760,23 @@ async function rerunFailedVideos(runId) {
   retryingRunId.value = runId
   try {
     await rerunFailedTaskVideos(runId)
+    await loadTaskRows()
+  } finally {
+    retryingRunId.value = null
+  }
+}
+
+async function ignoreFailedVideos({ runId, ids }) {
+  if (!ids.length) return
+  await ignoreTaskRunVideos(runId, ids)
+  await loadTaskRows()
+}
+
+async function rerunSelectedFailedVideos({ runId, ids }) {
+  if (!ids.length) return
+  retryingRunId.value = runId
+  try {
+    await rerunTaskRunVideos(runId, ids)
     await loadTaskRows()
   } finally {
     retryingRunId.value = null
@@ -629,6 +807,16 @@ function toggleTaskRunSelection(id) {
   selectedTaskRunIds.value = [...selectedTaskRunIds.value, id]
 }
 
+function toggleCurrentTaskPageSelection() {
+  const pageIds = pagedTaskRows.value.map((row) => row.id)
+  if (currentTaskPageAllSelected.value) {
+    selectedTaskRunIds.value = selectedTaskRunIds.value.filter((id) => !pageIds.includes(id))
+    return
+  }
+
+  selectedTaskRunIds.value = [...new Set([...selectedTaskRunIds.value, ...pageIds])]
+}
+
 async function deleteSelectedTaskRunRecords() {
   if (selectedTaskRunIds.value.length === 0) return
   if (hasRunningTask.value) {
@@ -645,6 +833,27 @@ async function deleteSelectedTaskRunRecords() {
   selectedTaskRunId.value = null
   selectedTaskRunIds.value = []
   taskDeleteMode.value = false
+  clearTaskRefreshTimer()
+  await loadTaskRows()
+}
+
+async function clearAllTaskRunRecords() {
+  if (taskRows.value.length === 0) return
+  if (hasRunningTask.value) {
+    window.alert("当前有运行中的任务，请等待任务完成后再清除记录。")
+    return
+  }
+
+  const confirmed = window.confirm(
+    `将清除全部 ${taskRows.value.length} 条任务执行记录，不会删除结果文件、运行数据库和爬取日志。是否继续？`,
+  )
+  if (!confirmed) return
+
+  await clearTaskRuns()
+  selectedTaskRunId.value = null
+  selectedTaskRunIds.value = []
+  taskDeleteMode.value = false
+  taskCurrentPage.value = 1
   clearTaskRefreshTimer()
   await loadTaskRows()
 }

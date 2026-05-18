@@ -35,12 +35,14 @@ from backend.config import (
     MIN_SILENCE_LEN_MS,
     KEEP_SILENCE_MS,
     SILENCE_THRESH_OFFSET_DB,
+    STATUS_NEW,
     STATUS_M3U8_DONE,
     STATUS_VIDEO_DONE,
     STATUS_AUDIO_DONE,
     STATUS_ASR_DONE,
     STATUS_DOCX_DONE,
     STATUS_FAILED,
+    STATUS_IGNORED,
     page_url_to_site_name,
     get_video_material_dir,
 )
@@ -310,20 +312,26 @@ def update_crawl_log_path(db_path: Path, run_id: str, crawl_log_path: str) -> No
     conn.close()
 
 
-def reset_completed_videos_with_missing_docx(
+def sync_video_statuses_with_local_artifacts(
     conn: sqlite3.Connection,
     start_time: str | None = None,
     end_time: str | None = None,
-) -> list[str]:
+) -> list[dict[str, str]]:
     """
-    如果数据库标记为已完成，但本地 Word 文件被手动删除，则重置为可重跑状态。
+    按本地最高可用产物校准数据库状态，避免手动删除文件后仍被跳过。
     """
     sql = """
-    SELECT item_id, docx_path
+    SELECT
+        item_id,
+        status,
+        m3u8_url,
+        mp4_path,
+        wav_path,
+        docx_path
     FROM videos
-    WHERE status = ?
+    WHERE status != ?
     """
-    params = [STATUS_DOCX_DONE]
+    params = [STATUS_IGNORED]
 
     if start_time:
         sql += " AND publish_time >= ?"
@@ -335,45 +343,101 @@ def reset_completed_videos_with_missing_docx(
 
     conn.row_factory = sqlite3.Row
     rows = conn.execute(sql, params).fetchall()
-    missing_item_ids = []
+    changed_items = []
 
     for row in rows:
-        docx_path = row["docx_path"]
-        if docx_path and existing_file(Path(docx_path)):
+        has_docx = bool(row["docx_path"]) and existing_file(Path(row["docx_path"]))
+        has_wav = bool(row["wav_path"]) and existing_file(Path(row["wav_path"]))
+        has_mp4 = bool(row["mp4_path"]) and existing_file(Path(row["mp4_path"]))
+        has_m3u8 = bool(row["m3u8_url"])
+
+        if has_docx:
+            next_status = STATUS_DOCX_DONE
+            fields = {
+                "status": next_status,
+                "error_step": None,
+                "error_type": None,
+                "error_message": None,
+            }
+            message = "本地 Word 文档存在，保持完成状态。"
+        elif has_wav:
+            next_status = STATUS_AUDIO_DONE
+            fields = {
+                "status": next_status,
+                "docx_done_at": None,
+                "asr_done_at": None,
+                "error_step": STEP_DOCX,
+                "error_type": "MissingOutputFile",
+                "error_message": "Word 文档不存在，已回退到音频阶段等待重新转写并生成文档。",
+            }
+            message = "Word 文档不存在，回退到音频阶段。"
+        elif has_mp4:
+            next_status = STATUS_VIDEO_DONE
+            fields = {
+                "status": next_status,
+                "wav_size": None,
+                "audio_duration_ms": None,
+                "audio_done_at": None,
+                "asr_done_at": None,
+                "docx_done_at": None,
+                "error_step": STEP_AUDIO,
+                "error_type": "MissingOutputFile",
+                "error_message": "音频和 Word 文档不存在，已回退到视频阶段等待重新提取音频。",
+            }
+            message = "音频和 Word 文档不存在，回退到视频阶段。"
+        elif has_m3u8:
+            next_status = STATUS_M3U8_DONE
+            fields = {
+                "status": next_status,
+                "mp4_size": None,
+                "wav_size": None,
+                "audio_duration_ms": None,
+                "video_done_at": None,
+                "audio_done_at": None,
+                "asr_done_at": None,
+                "docx_done_at": None,
+                "error_step": STEP_VIDEO,
+                "error_type": "MissingOutputFile",
+                "error_message": "视频、音频和 Word 文档不存在，已回退到 m3u8 阶段等待重新下载视频。",
+            }
+            message = "视频、音频和 Word 文档不存在，回退到 m3u8 阶段。"
+        else:
+            next_status = STATUS_NEW
+            fields = {
+                "status": next_status,
+                "m3u8_url": None,
+                "mp4_size": None,
+                "wav_size": None,
+                "audio_duration_ms": None,
+                "m3u8_done_at": None,
+                "video_done_at": None,
+                "audio_done_at": None,
+                "asr_done_at": None,
+                "docx_done_at": None,
+                "error_step": STEP_M3U8,
+                "error_type": "MissingOutputFile",
+                "error_message": "本地处理产物均不存在，已回退到初始阶段等待重新捕获 m3u8。",
+            }
+            message = "本地处理产物均不存在，回退到初始阶段。"
+
+        if row["status"] == next_status:
             continue
-        missing_item_ids.append(row["item_id"])
 
-    if not missing_item_ids:
-        return []
+        update_video_record(conn, row["item_id"], **fields)
+        changed_items.append({
+            "item_id": row["item_id"],
+            "status": next_status,
+            "message": message,
+        })
 
-    placeholders = ",".join("?" for _ in missing_item_ids)
-    conn.execute(f"""
-    UPDATE videos
-    SET status = ?,
-        docx_path = '',
-        docx_done_at = NULL,
-        error_step = ?,
-        error_type = ?,
-        error_message = ?,
-        updated_at = ?
-    WHERE item_id IN ({placeholders})
-    """, (
-        STATUS_ASR_DONE,
-        STEP_DOCX,
-        "MissingOutputFile",
-        "数据库标记已完成，但本地 Word 文档不存在，已自动重置等待重跑。",
-        now_str(),
-        *missing_item_ids,
-    ))
-    conn.commit()
-
-    return missing_item_ids
+    return changed_items
 
 
 def load_pending_videos(
     conn: sqlite3.Connection,
     start_time: str | None = None,
     end_time: str | None = None,
+    item_ids: list[str] | None = None,
 ) -> list[sqlite3.Row]:
     """
     读取未完成视频。
@@ -383,7 +447,43 @@ def load_pending_videos(
     sql = """
     SELECT *
     FROM videos
-    WHERE status != ?
+    WHERE status NOT IN (?, ?)
+    """
+    params = [STATUS_DOCX_DONE, STATUS_IGNORED]
+
+    if start_time:
+        sql += " AND publish_time >= ?"
+        params.append(start_time)
+
+    if end_time:
+        sql += " AND publish_time <= ?"
+        params.append(end_time)
+
+    if item_ids:
+        placeholders = ",".join("?" for _ in item_ids)
+        sql += f" AND item_id IN ({placeholders})"
+        params.extend(item_ids)
+
+    sql += " ORDER BY publish_time DESC"
+
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(sql, params).fetchall()
+    return rows
+
+
+def load_existing_done_videos(
+    conn: sqlite3.Connection,
+    start_time: str | None = None,
+    end_time: str | None = None,
+) -> list[sqlite3.Row]:
+    """
+    读取当前时间范围内已经有最高产物的历史视频。
+    这些记录只用于本次执行明细展示，不计入本次新处理数量。
+    """
+    sql = """
+    SELECT *
+    FROM videos
+    WHERE status = ?
     """
     params = [STATUS_DOCX_DONE]
 
@@ -1037,6 +1137,7 @@ def process_one_db(
     page_url: str | None = None,
     run_started_at: str | None = None,
     on_progress: Callable[[dict], None] | None = None,
+    target_item_ids: list[str] | None = None,
 ) -> dict:
     print("\n" + "#" * 100)
     print(f"开始处理 DB：{db_path}")
@@ -1050,21 +1151,28 @@ def process_one_db(
     conn.row_factory = sqlite3.Row
     create_table(conn)
 
-    reset_item_ids = reset_completed_videos_with_missing_docx(
+    artifact_sync_results = sync_video_statuses_with_local_artifacts(
         conn,
         start_time=start_time,
         end_time=end_time,
     )
-    if reset_item_ids:
-        print(f"[CHECK] 已重置缺失 Word 文档的视频数：{len(reset_item_ids)}")
+    if artifact_sync_results:
+        print(f"[CHECK] 已按本地最高产物校准视频状态数：{len(artifact_sync_results)}")
 
     pending_rows = load_pending_videos(
+        conn,
+        start_time=start_time,
+        end_time=end_time,
+        item_ids=target_item_ids,
+    )
+    existing_done_rows = load_existing_done_videos(
         conn,
         start_time=start_time,
         end_time=end_time,
     )
 
     print(f"待处理视频数：{len(pending_rows)}")
+    print(f"已存在成品视频数：{len(existing_done_rows)}")
 
     processed_item_ids = [row["item_id"] for row in pending_rows]
     if on_progress:
@@ -1083,8 +1191,26 @@ def process_one_db(
                     "title": row["title"],
                     "detailUrl": row["detail_url"],
                     "publishTime": row["publish_time"] or "",
+                    "executedAt": row["last_processed_at"] or run_started_at,
+                    "status": "EXISTING",
+                    "mp4Path": row["mp4_path"] or "",
+                    "wavPath": row["wav_path"] or "",
+                    "docxPath": row["docx_path"] or "",
+                    "errorStep": "",
+                    "errorType": "",
+                    "errorMessage": "",
+                }
+                for row in existing_done_rows
+            ] + [
+                {
+                    "id": row["item_id"],
+                    "title": row["title"],
+                    "detailUrl": row["detail_url"],
+                    "publishTime": row["publish_time"] or "",
                     "executedAt": run_started_at,
                     "status": "PROCESSING",
+                    "mp4Path": "",
+                    "wavPath": "",
                     "docxPath": "",
                     "errorStep": "",
                     "errorType": "",
@@ -1124,6 +1250,8 @@ def process_one_db(
                 publish_time,
                 last_processed_at,
                 status,
+                mp4_path,
+                wav_path,
                 docx_path,
                 error_step,
                 error_type,
@@ -1150,6 +1278,8 @@ def process_one_db(
                         "publishTime": updated_row["publish_time"] or "",
                         "executedAt": updated_row["last_processed_at"] or now_str(),
                         "status": updated_row["status"],
+                        "mp4Path": updated_row["mp4_path"] or "",
+                        "wavPath": updated_row["wav_path"] or "",
                         "docxPath": updated_row["docx_path"] or "",
                         "errorStep": updated_row["error_step"] or "",
                         "errorType": updated_row["error_type"] or "",
@@ -1168,8 +1298,8 @@ def process_one_db(
     )
 
     remain = conn.execute(
-        "SELECT COUNT(*) FROM videos WHERE status != ?",
-        (STATUS_DOCX_DONE,)
+        "SELECT COUNT(*) FROM videos WHERE status NOT IN (?, ?)",
+        (STATUS_DOCX_DONE, STATUS_IGNORED)
     ).fetchone()[0]
 
     done = conn.execute(
@@ -1210,6 +1340,7 @@ def process_sites(
     run_id: str | None = None,
     run_started_at: str | None = None,
     on_progress: Callable[[dict], None] | None = None,
+    target_item_ids: list[str] | None = None,
 ) -> list[dict]:
     """
     由 pipeline 调用：
@@ -1248,6 +1379,7 @@ def process_sites(
             page_url=page_url_by_site.get(site_name, site_name),
             run_started_at=run_started_at,
             on_progress=on_progress,
+            target_item_ids=target_item_ids,
         )
         results.append(result)
 

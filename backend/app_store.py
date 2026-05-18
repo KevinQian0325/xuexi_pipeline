@@ -148,6 +148,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         publish_time TEXT,
         executed_at TEXT NOT NULL,
         status TEXT NOT NULL,
+        mp4_path TEXT,
+        wav_path TEXT,
         docx_path TEXT,
         sort_order INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (run_id) REFERENCES task_runs(id) ON DELETE CASCADE
@@ -158,16 +160,77 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         for row in conn.execute("PRAGMA table_info(task_run_details)").fetchall()
     }
     for column_name, column_type in {
+        "mp4_path": "TEXT",
+        "wav_path": "TEXT",
         "error_step": "TEXT",
         "error_type": "TEXT",
         "error_message": "TEXT",
+        "ignored_at": "TEXT",
+        "ignored_reason": "TEXT",
+        "ignored_from_status": "TEXT",
     }.items():
         if column_name not in existing_detail_columns:
             conn.execute(f"ALTER TABLE task_run_details ADD COLUMN {column_name} {column_type}")
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_task_runs_executed_at ON task_runs(executed_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_task_run_details_run_id ON task_run_details(run_id)")
+    backfill_task_run_detail_artifact_paths(conn)
     conn.commit()
+
+
+def backfill_task_run_detail_artifact_paths(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("""
+    SELECT id, item_id
+    FROM task_run_details
+    WHERE COALESCE(mp4_path, '') = ''
+       OR COALESCE(wav_path, '') = ''
+       OR COALESCE(docx_path, '') = ''
+    """).fetchall()
+    if not rows or not config.DB_DIR.exists():
+        return
+
+    detail_ids_by_item_id: dict[str, list[int]] = {}
+    for row in rows:
+        detail_ids_by_item_id.setdefault(str(row["item_id"]), []).append(int(row["id"]))
+
+    remaining_item_ids = set(detail_ids_by_item_id)
+    for db_path in config.DB_DIR.glob("*/*.db"):
+        if not remaining_item_ids:
+            break
+
+        runtime_conn = sqlite3.connect(db_path)
+        runtime_conn.row_factory = sqlite3.Row
+        try:
+            item_ids = sorted(remaining_item_ids)
+            for start in range(0, len(item_ids), 900):
+                batch = item_ids[start:start + 900]
+                placeholders = ",".join("?" for _ in batch)
+                video_rows = runtime_conn.execute(f"""
+                SELECT item_id, mp4_path, wav_path, docx_path
+                FROM videos
+                WHERE item_id IN ({placeholders})
+                """, batch).fetchall()
+
+                for video_row in video_rows:
+                    item_id = str(video_row["item_id"])
+                    for detail_id in detail_ids_by_item_id.get(item_id, []):
+                        conn.execute("""
+                        UPDATE task_run_details
+                        SET mp4_path = CASE WHEN COALESCE(mp4_path, '') = '' THEN ? ELSE mp4_path END,
+                            wav_path = CASE WHEN COALESCE(wav_path, '') = '' THEN ? ELSE wav_path END,
+                            docx_path = CASE WHEN COALESCE(docx_path, '') = '' THEN ? ELSE docx_path END
+                        WHERE id = ?
+                        """, (
+                            video_row["mp4_path"] or "",
+                            video_row["wav_path"] or "",
+                            video_row["docx_path"] or "",
+                            detail_id,
+                        ))
+                    remaining_item_ids.discard(item_id)
+        except sqlite3.Error:
+            continue
+        finally:
+            runtime_conn.close()
 
 
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
@@ -192,7 +255,7 @@ def seed_defaults(conn: sqlite3.Connection) -> None:
     defaults = {
         "xuexiAppId": os.getenv("XUEXI_APP_ID", ""),
         "xuexiAccessToken": os.getenv("XUEXI_ACCESS_TOKEN", ""),
-        "resultFilesDir": str(config.RESULT_STORAGE_ROOT_DIR),
+        "resultFilesDir": os.getenv("XUEXI_RESULT_STORAGE_ROOT_DIR", ""),
     }
     for key, value in defaults.items():
         conn.execute("""
@@ -364,10 +427,15 @@ def row_to_task_run_detail(row: sqlite3.Row) -> dict[str, Any]:
         "publishTime": row["publish_time"],
         "executedAt": row["executed_at"],
         "status": row["status"],
+        "mp4Path": row["mp4_path"] or "",
+        "wavPath": row["wav_path"] or "",
         "docxPath": row["docx_path"] or "",
         "errorStep": row["error_step"] or "",
         "errorType": row["error_type"] or "",
         "errorMessage": row["error_message"] or "",
+        "ignoredAt": row["ignored_at"] or "",
+        "ignoredReason": row["ignored_reason"] or "",
+        "ignoredFromStatus": row["ignored_from_status"] or "",
     }
 
 
@@ -425,13 +493,18 @@ def insert_task_run(conn: sqlite3.Connection, run: dict[str, Any]) -> int:
             publish_time,
             executed_at,
             status,
+            mp4_path,
+            wav_path,
             docx_path,
             error_step,
             error_type,
             error_message,
+            ignored_at,
+            ignored_reason,
+            ignored_from_status,
             sort_order
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             run_id,
             str(detail["id"]),
@@ -440,10 +513,15 @@ def insert_task_run(conn: sqlite3.Connection, run: dict[str, Any]) -> int:
             detail.get("publishTime"),
             detail["executedAt"],
             detail["status"],
+            detail.get("mp4Path") or "",
+            detail.get("wavPath") or "",
             detail.get("docxPath") or "",
             detail.get("errorStep") or "",
             detail.get("errorType") or "",
             detail.get("errorMessage") or "",
+            detail.get("ignoredAt") or "",
+            detail.get("ignoredReason") or "",
+            detail.get("ignoredFromStatus") or "",
             index,
         ))
 
@@ -513,6 +591,223 @@ def clear_task_runs() -> int:
         conn.execute("DELETE FROM task_runs")
         conn.commit()
     return deleted_count
+
+
+def recalculate_task_run_summary(conn: sqlite3.Connection, run_id: int | str) -> None:
+    run_row = conn.execute(
+        "SELECT status FROM task_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    if run_row is None or run_row["status"] == "RUNNING":
+        return
+
+    details = load_task_run_details(conn, int(run_id))
+    counted_details = [
+        detail
+        for detail in details
+        if detail.get("status") != "EXISTING"
+    ]
+    success_count = sum(
+        1
+        for detail in counted_details
+        if detail.get("status") in {"DOCX_DONE", "IGNORED"}
+    )
+    total_count = len(counted_details)
+    status = calculate_task_run_status(success_count, total_count)
+    conn.execute("""
+    UPDATE task_runs
+    SET status = ?,
+        success_count = ?,
+        total_count = ?,
+        updated_at = ?
+    WHERE id = ?
+    """, (
+        status,
+        success_count,
+        total_count,
+        now_string(),
+        run_id,
+    ))
+
+
+def recalculate_task_run_summaries(conn: sqlite3.Connection, run_ids: set[int]) -> None:
+    for run_id in sorted(run_ids):
+        recalculate_task_run_summary(conn, run_id)
+
+
+def detail_sync_values(detail: dict[str, Any]) -> dict[str, str]:
+    return {
+        "status": detail.get("status") or "",
+        "mp4_path": detail.get("mp4Path") or "",
+        "wav_path": detail.get("wavPath") or "",
+        "docx_path": detail.get("docxPath") or "",
+        "error_step": detail.get("errorStep") or "",
+        "error_type": detail.get("errorType") or "",
+        "error_message": detail.get("errorMessage") or "",
+        "ignored_at": detail.get("ignoredAt") or "",
+        "ignored_reason": detail.get("ignoredReason") or "",
+        "ignored_from_status": detail.get("ignoredFromStatus") or "",
+    }
+
+
+def sync_task_run_detail_states_by_item_id(
+    conn: sqlite3.Connection,
+    details: list[dict[str, Any]],
+    *,
+    skip_run_ids: set[int] | None = None,
+) -> None:
+    """
+    同步同一 item_id 在任务执行明细里的当前处理状态。
+
+    保留每条任务自己的 executed_at/sort_order/run_id，只同步视频实体状态字段。
+    EXISTING 是本次运行的展示分类，PROCESSING 是临时态，都不作为全局状态源。
+    """
+    sync_details = {
+        str(detail["id"]): detail
+        for detail in details
+        if str(detail.get("id", "")).strip()
+        and detail.get("status") not in {"EXISTING", "PROCESSING"}
+    }
+    if not sync_details:
+        return
+
+    affected_run_ids: set[int] = set()
+    for item_id, detail in sync_details.items():
+        rows = conn.execute(
+            "SELECT DISTINCT run_id FROM task_run_details WHERE item_id = ? AND status != 'EXISTING'",
+            (item_id,),
+        ).fetchall()
+        affected_run_ids.update(int(row["run_id"]) for row in rows)
+
+        values = detail_sync_values(detail)
+        conn.execute("""
+        UPDATE task_run_details
+        SET status = ?,
+            mp4_path = ?,
+            wav_path = ?,
+            docx_path = ?,
+            error_step = ?,
+            error_type = ?,
+            error_message = ?,
+            ignored_at = ?,
+            ignored_reason = ?,
+            ignored_from_status = ?
+        WHERE item_id = ?
+          AND status != 'EXISTING'
+        """, (
+            values["status"],
+            values["mp4_path"],
+            values["wav_path"],
+            values["docx_path"],
+            values["error_step"],
+            values["error_type"],
+            values["error_message"],
+            values["ignored_at"],
+            values["ignored_reason"],
+            values["ignored_from_status"],
+            item_id,
+        ))
+
+    if skip_run_ids:
+        affected_run_ids.difference_update(skip_run_ids)
+
+    recalculate_task_run_summaries(conn, affected_run_ids)
+
+
+def ignore_task_run_details(run_id: int | str, item_ids: list[str], reason: str = "") -> int:
+    normalized_item_ids = sorted({str(item_id) for item_id in item_ids if str(item_id).strip()})
+    if not normalized_item_ids:
+        return 0
+
+    placeholders = ",".join("?" for _ in normalized_item_ids)
+    ignored_at = now_string()
+    with connect() as conn:
+        affected_rows = conn.execute(f"""
+        SELECT DISTINCT run_id
+        FROM task_run_details
+        WHERE item_id IN ({placeholders})
+          AND status NOT IN ('DOCX_DONE', 'EXISTING', 'IGNORED')
+        """, normalized_item_ids).fetchall()
+        affected_run_ids = {int(row["run_id"]) for row in affected_rows}
+
+        cursor = conn.execute(f"""
+        UPDATE task_run_details
+        SET ignored_from_status = CASE
+                WHEN COALESCE(ignored_from_status, '') = '' THEN status
+                ELSE ignored_from_status
+            END,
+            status = 'IGNORED',
+            ignored_at = ?,
+            ignored_reason = ?,
+            sort_order = sort_order
+        WHERE item_id IN ({placeholders})
+          AND status NOT IN ('DOCX_DONE', 'EXISTING', 'IGNORED')
+        """, (
+            ignored_at,
+            reason,
+            *normalized_item_ids,
+        ))
+        ignored_count = cursor.rowcount
+        recalculate_task_run_summaries(conn, affected_run_ids)
+        conn.commit()
+    return ignored_count
+
+
+def ensure_runtime_ignore_columns(conn: sqlite3.Connection) -> None:
+    existing_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(videos)").fetchall()
+    }
+    for column_name, column_type in {
+        "ignored_at": "TEXT",
+        "ignored_reason": "TEXT",
+        "ignored_from_status": "TEXT",
+    }.items():
+        if column_name not in existing_columns:
+            conn.execute(f"ALTER TABLE videos ADD COLUMN {column_name} {column_type}")
+
+
+def ignore_runtime_videos(page_url: str, item_ids: list[str], reason: str = "") -> int:
+    normalized_item_ids = sorted({str(item_id) for item_id in item_ids if str(item_id).strip()})
+    if not normalized_item_ids or not config.DB_DIR.exists():
+        return 0
+
+    site_dir = config.DB_DIR / config.page_url_to_site_name(page_url)
+    if not site_dir.exists():
+        return 0
+
+    ignored_at = now_string()
+    ignored_count = 0
+    placeholders = ",".join("?" for _ in normalized_item_ids)
+    for db_path in site_dir.glob("*.db"):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            ensure_runtime_ignore_columns(conn)
+            cursor = conn.execute(f"""
+            UPDATE videos
+            SET ignored_from_status = CASE
+                    WHEN COALESCE(ignored_from_status, '') = '' THEN status
+                    ELSE ignored_from_status
+                END,
+                status = 'IGNORED',
+                ignored_at = ?,
+                ignored_reason = ?,
+                updated_at = ?
+            WHERE item_id IN ({placeholders})
+              AND status NOT IN ('DOCX_DONE', 'IGNORED')
+            """, (
+                ignored_at,
+                reason,
+                ignored_at,
+                *normalized_item_ids,
+            ))
+            ignored_count += cursor.rowcount
+            conn.commit()
+        finally:
+            conn.close()
+
+    return ignored_count
 
 
 def create_task_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -612,13 +907,18 @@ def upsert_task_run_progress_details(
                 publish_time,
                 executed_at,
                 status,
+                mp4_path,
+                wav_path,
                 docx_path,
                 error_step,
                 error_type,
                 error_message,
+                ignored_at,
+                ignored_reason,
+                ignored_from_status,
                 sort_order
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 run_id,
                 str(detail["id"]),
@@ -627,12 +927,22 @@ def upsert_task_run_progress_details(
                 detail.get("publishTime"),
                 detail.get("executedAt") or now_string(),
                 detail["status"],
+                detail.get("mp4Path") or "",
+                detail.get("wavPath") or "",
                 detail.get("docxPath") or "",
                 detail.get("errorStep") or "",
                 detail.get("errorType") or "",
                 detail.get("errorMessage") or "",
+                detail.get("ignoredAt") or "",
+                detail.get("ignoredReason") or "",
+                detail.get("ignoredFromStatus") or "",
                 index,
             ))
+        sync_task_run_detail_states_by_item_id(
+            conn,
+            details,
+            skip_run_ids={int(run_id)},
+        )
         conn.commit()
 
     return get_task_run(str(run_id))
@@ -677,8 +987,17 @@ def replace_task_run_details(
         else:
             merged_details = details
 
-        success_count = sum(1 for detail in merged_details if detail.get("status") == "DOCX_DONE")
-        total_count = len(merged_details)
+        counted_details = [
+            detail
+            for detail in merged_details
+            if detail.get("status") != "EXISTING"
+        ]
+        success_count = sum(
+            1
+            for detail in counted_details
+            if detail.get("status") in {"DOCX_DONE", "IGNORED"}
+        )
+        total_count = len(counted_details)
         merged_status = calculate_task_run_status(success_count, total_count)
 
         conn.execute("DELETE FROM task_run_details WHERE run_id = ?", (run_id,))
@@ -692,13 +1011,18 @@ def replace_task_run_details(
                 publish_time,
                 executed_at,
                 status,
+                mp4_path,
+                wav_path,
                 docx_path,
                 error_step,
                 error_type,
                 error_message,
+                ignored_at,
+                ignored_reason,
+                ignored_from_status,
                 sort_order
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 run_id,
                 str(detail["id"]),
@@ -707,10 +1031,15 @@ def replace_task_run_details(
                 detail.get("publishTime"),
                 detail.get("executedAt") or executed_at,
                 detail["status"],
+                detail.get("mp4Path") or "",
+                detail.get("wavPath") or "",
                 detail.get("docxPath") or "",
                 detail.get("errorStep") or "",
                 detail.get("errorType") or "",
                 detail.get("errorMessage") or "",
+                detail.get("ignoredAt") or "",
+                detail.get("ignoredReason") or "",
+                detail.get("ignoredFromStatus") or "",
                 index,
             ))
 
@@ -732,6 +1061,7 @@ def replace_task_run_details(
             now_string(),
             run_id,
         ))
+        sync_task_run_detail_states_by_item_id(conn, details)
         conn.commit()
 
     return get_task_run(str(run_id))

@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from backend import app_store
+from backend import integrity_checker
+from backend import storage_migration
 from backend.pipeline_runner import run_real_pipeline_for_task
 
 
@@ -82,8 +84,17 @@ class TaskRunDelete(BaseModel):
     ids: list[int]
 
 
+class TaskRunVideoAction(BaseModel):
+    ids: list[str]
+    reason: str | None = None
+
+
 class OpenPathRequest(BaseModel):
     path: str
+
+
+class IntegrityCheckRequest(BaseModel):
+    siteIds: list[int]
 
 
 def resolve_open_target(raw_path: str) -> Path:
@@ -152,12 +163,32 @@ def get_env_config() -> dict[str, str]:
 
 
 @app.put("/api/env-config")
-def update_env_config(payload: EnvConfigUpdate, request: Request) -> dict[str, str]:
+def update_env_config(payload: EnvConfigUpdate, request: Request) -> dict[str, Any]:
+    migration_result = None
+    current_config = app_store.get_env_config()
+    current_root = current_config.get("resultFilesDir", "")
+    requested_root = payload.resultFilesDir
+    path_changed = (
+        is_local_request(request)
+        and storage_migration.normalize_storage_root(current_root)
+        != storage_migration.normalize_storage_root(requested_root)
+    )
+    if path_changed:
+        if app_store.has_running_task_runs():
+            raise HTTPException(status_code=409, detail="当前有运行中的任务，不能迁移保存根目录")
+        try:
+            migration_result = storage_migration.migrate_storage_root(
+                current_root,
+                requested_root,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     app_store.update_env_config(
         payload.model_dump(),
         allow_path_update=is_local_request(request),
     )
-    return {"message": "密钥配置已保存"}
+    return {"message": "密钥配置已保存", "migration": migration_result}
 
 
 @app.get("/api/task-runs")
@@ -204,6 +235,22 @@ def open_path(payload: OpenPathRequest, request: Request) -> dict[str, str]:
     return {"message": "已打开", "path": str(target_path)}
 
 
+@app.post("/api/integrity-check")
+def check_file_integrity(payload: IntegrityCheckRequest) -> dict[str, Any]:
+    if not payload.siteIds:
+        raise HTTPException(status_code=400, detail="请选择要检查的网页")
+
+    return integrity_checker.check_sites(payload.siteIds)
+
+
+@app.post("/api/integrity-check/repair")
+def repair_file_integrity(payload: IntegrityCheckRequest) -> dict[str, Any]:
+    if not payload.siteIds:
+        raise HTTPException(status_code=400, detail="请选择要修复的网页")
+
+    return integrity_checker.repair_sites(payload.siteIds)
+
+
 @app.post("/api/task-runs/start")
 def start_task_runs(payload: TaskRunStart, background_tasks: BackgroundTasks) -> dict[str, Any]:
     now = now_string()
@@ -244,7 +291,7 @@ def rerun_failed_task_videos(run_id: str, background_tasks: BackgroundTasks) -> 
     failed_details = [
         detail
         for detail in run["details"]
-        if detail["status"] != "DOCX_DONE"
+        if detail["status"] not in {"DOCX_DONE", "EXISTING", "IGNORED"}
     ]
     if not failed_details:
         raise HTTPException(status_code=400, detail="没有失败视频需要重新运行")
@@ -268,3 +315,83 @@ def rerun_failed_task_videos(run_id: str, background_tasks: BackgroundTasks) -> 
 
     updated_run = app_store.get_task_run(run_id)
     return {"item": updated_run, "message": "失败视频重新运行任务已创建"}
+
+
+@app.post("/api/task-runs/{run_id}/rerun-videos")
+def rerun_selected_task_videos(
+    run_id: str,
+    payload: TaskRunVideoAction,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    item_ids = sorted({str(item_id) for item_id in payload.ids if str(item_id).strip()})
+    if not item_ids:
+        raise HTTPException(status_code=400, detail="请选择要重新运行的视频")
+
+    run = app_store.get_task_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="任务记录不存在")
+    if run["status"] == "RUNNING":
+        raise HTTPException(status_code=409, detail="任务仍在运行中")
+
+    available_failed_ids = {
+        str(detail["id"])
+        for detail in run["details"]
+        if detail["status"] not in {"DOCX_DONE", "EXISTING", "IGNORED"}
+    }
+    invalid_ids = [item_id for item_id in item_ids if item_id not in available_failed_ids]
+    if invalid_ids:
+        raise HTTPException(status_code=400, detail="只能重新运行当前任务中的失败视频")
+
+    app_store.update_task_run_summary(
+        run_id,
+        status="RUNNING",
+        executed_at=now_string(),
+        duration="00:00:00",
+    )
+    background_tasks.add_task(
+        run_real_pipeline_for_task,
+        int(run["id"]),
+        {
+            "remark": run["remark"],
+            "pageUrl": run["pageUrl"],
+            "startDate": run.get("startDate"),
+            "endDate": run.get("endDate"),
+            "itemIds": item_ids,
+        },
+    )
+
+    updated_run = app_store.get_task_run(run_id)
+    return {"item": updated_run, "message": "所选失败视频重新运行任务已创建"}
+
+
+@app.post("/api/task-runs/{run_id}/ignore-videos")
+def ignore_task_run_videos(run_id: str, payload: TaskRunVideoAction) -> dict[str, Any]:
+    item_ids = sorted({str(item_id) for item_id in payload.ids if str(item_id).strip()})
+    if not item_ids:
+        raise HTTPException(status_code=400, detail="请选择要忽略的视频")
+
+    run = app_store.get_task_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="任务记录不存在")
+    if run["status"] == "RUNNING":
+        raise HTTPException(status_code=409, detail="任务仍在运行中，不能忽略视频")
+
+    available_failed_ids = {
+        str(detail["id"])
+        for detail in run["details"]
+        if detail["status"] not in {"DOCX_DONE", "EXISTING", "IGNORED"}
+    }
+    invalid_ids = [item_id for item_id in item_ids if item_id not in available_failed_ids]
+    if invalid_ids:
+        raise HTTPException(status_code=400, detail="只能忽略当前任务中的失败视频")
+
+    reason = (payload.reason or "用户确认忽略").strip() or "用户确认忽略"
+    app_detail_count = app_store.ignore_task_run_details(run_id, item_ids, reason)
+    runtime_count = app_store.ignore_runtime_videos(run["pageUrl"], item_ids, reason)
+    updated_run = app_store.get_task_run(run_id)
+    return {
+        "item": updated_run,
+        "ignoredCount": app_detail_count,
+        "runtimeIgnoredCount": runtime_count,
+        "message": "已忽略所选失败视频",
+    }

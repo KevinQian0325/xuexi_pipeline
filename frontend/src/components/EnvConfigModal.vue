@@ -89,7 +89,7 @@ const props = defineProps({
     default: () => ({
       xuexiAppId: "",
       xuexiAccessToken: "",
-      resultFilesDir: "结果文件夹",
+      resultFilesDir: "",
     }),
   },
   canEditServerPaths: {
@@ -101,14 +101,14 @@ const props = defineProps({
 const form = reactive({
   xuexiAppId: props.initialValue.xuexiAppId ?? "",
   xuexiAccessToken: props.initialValue.xuexiAccessToken ?? "",
-  resultFilesDir: props.initialValue.resultFilesDir ?? "结果文件夹",
+  resultFilesDir: props.initialValue.resultFilesDir ?? "",
 })
 
 const errorMessage = ref("")
 
 const storageDescription = computed(() => {
   if (props.canEditServerPaths) {
-    return "程序会自动在这个根目录下创建“结果文件”文件夹。"
+    return "首次使用前必须设置。程序会自动在这个根目录下创建“结果文件”文件夹。"
   }
   return "此地址绑定服务器本机，远程访问时只能查看，不能修改。"
 })
