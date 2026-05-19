@@ -260,6 +260,7 @@ def run_real_pipeline_for_task(app_run_id: int, site: dict[str, Any]) -> None:
             run_started_at=executed_at,
             on_progress=update_task_progress,
             target_item_ids=site.get("itemIds"),
+            include_existing_done=site.get("includeExistingDone", True),
         )
         write_pipeline_log(
             f"PROCESS_VIDEO_DONE app_run_id={app_run_id} results={process_results}"

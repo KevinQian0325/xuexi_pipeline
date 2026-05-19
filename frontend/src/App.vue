@@ -393,7 +393,9 @@
     <FileIntegrityCheckModal
       v-if="modalState === 'integrity-check'"
       :sites="integrityCheckSites"
+      :has-running-task="hasRunningTask"
       @close="closeModal"
+      @repair-started="handleIntegrityRepairStarted"
     />
 
     <ListenerSiteFormModal
@@ -709,6 +711,12 @@ async function openIntegrityCheckModal() {
   const response = await listListenerSites("")
   integrityCheckSites.value = response.items
   modalState.value = "integrity-check"
+}
+
+async function handleIntegrityRepairStarted() {
+  await loadTaskRows()
+  activeSection.value = "tasks"
+  taskCurrentPage.value = 1
 }
 
 function openRemarkModal(row) {

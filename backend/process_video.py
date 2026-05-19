@@ -948,6 +948,20 @@ def process_one_video(
     mp4_path = get_existing_output_path(row, "mp4_path", mp4_path)
     wav_path = get_existing_output_path(row, "wav_path", wav_path)
     docx_path = get_existing_output_path(row, "docx_path", docx_path)
+    start_status = row["status"]
+    force_rebuild = start_status in {
+        STATUS_NEW,
+        STATUS_M3U8_DONE,
+        STATUS_VIDEO_DONE,
+        STATUS_AUDIO_DONE,
+        STATUS_ASR_DONE,
+    }
+    allow_existing_docx = not force_rebuild
+    allow_existing_wav = not force_rebuild or start_status in {STATUS_AUDIO_DONE, STATUS_ASR_DONE}
+    allow_existing_mp4 = (
+        not force_rebuild
+        or start_status in {STATUS_VIDEO_DONE, STATUS_AUDIO_DONE, STATUS_ASR_DONE}
+    )
 
     print("=" * 100)
     print(f"[VIDEO] 开始处理 item_id={item_id}")
@@ -966,7 +980,7 @@ def process_one_video(
     current_step = "INIT"
 
     try:
-        if existing_file(docx_path):
+        if allow_existing_docx and existing_file(docx_path):
             update_video_record(
                 conn,
                 item_id,
@@ -979,8 +993,8 @@ def process_one_video(
             print(f"[SKIP] 已存在 Word 文档，直接标记完成: {docx_path}")
             return STATUS_DOCX_DONE
 
-        has_existing_wav = existing_file(wav_path)
-        has_existing_mp4 = existing_file(mp4_path)
+        has_existing_wav = allow_existing_wav and existing_file(wav_path)
+        has_existing_mp4 = allow_existing_mp4 and existing_file(mp4_path)
 
         # 1) 抓 m3u8
         m3u8_url = row["m3u8_url"]
@@ -1138,6 +1152,7 @@ def process_one_db(
     run_started_at: str | None = None,
     on_progress: Callable[[dict], None] | None = None,
     target_item_ids: list[str] | None = None,
+    include_existing_done: bool = True,
 ) -> dict:
     print("\n" + "#" * 100)
     print(f"开始处理 DB：{db_path}")
@@ -1165,11 +1180,13 @@ def process_one_db(
         end_time=end_time,
         item_ids=target_item_ids,
     )
-    existing_done_rows = load_existing_done_videos(
-        conn,
-        start_time=start_time,
-        end_time=end_time,
-    )
+    existing_done_rows = []
+    if include_existing_done:
+        existing_done_rows = load_existing_done_videos(
+            conn,
+            start_time=start_time,
+            end_time=end_time,
+        )
 
     print(f"待处理视频数：{len(pending_rows)}")
     print(f"已存在成品视频数：{len(existing_done_rows)}")
@@ -1341,6 +1358,7 @@ def process_sites(
     run_started_at: str | None = None,
     on_progress: Callable[[dict], None] | None = None,
     target_item_ids: list[str] | None = None,
+    include_existing_done: bool = True,
 ) -> list[dict]:
     """
     由 pipeline 调用：
@@ -1380,6 +1398,7 @@ def process_sites(
             run_started_at=run_started_at,
             on_progress=on_progress,
             target_item_ids=target_item_ids,
+            include_existing_done=include_existing_done,
         )
         results.append(result)
 

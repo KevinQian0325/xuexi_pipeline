@@ -1,125 +1,137 @@
 <template>
   <BaseModal
     title="文件完整性检查"
-    description="按后端运行数据库检查本地结果文件是否丢失。"
+    description="检查已生成文档的视频是否仍保留视频、音频和 Word 文档。"
     size="large"
     @close="$emit('close')"
   >
     <div class="integrity-layout">
-      <div class="integrity-toolbar">
-        <div>
-          <strong>选择要检查的网页</strong>
-          <span>已选 {{ selectedIds.length }}/{{ sites.length }}，当前筛选 {{ filteredSites.length }} 个</span>
-        </div>
-        <button class="secondary-button compact-action-button" type="button" @click="toggleAll">
-          {{ allFilteredSelected ? "取消全选" : "全选筛选结果" }}
-        </button>
-      </div>
-
-      <label class="search-box integrity-search-box">
-        <span>⌕</span>
-        <input
-          v-model.trim="siteKeyword"
-          type="search"
-          placeholder="搜索网页备注或地址..."
-        />
-      </label>
-
-      <div class="integrity-site-list">
-        <button
-          v-for="site in pagedSites"
-          :key="site.id"
-          class="integrity-site-row"
-          :class="{ 'is-selected': selectedIds.includes(site.id) }"
-          type="button"
-          @click="toggleSite(site.id)"
-        >
-          <span class="selection-box" :class="{ 'is-selected': selectedIds.includes(site.id) }">
-            <span v-if="selectedIds.includes(site.id)">✓</span>
-          </span>
-          <span>
-            <strong>{{ site.remark }}</strong>
-            <small>{{ site.pageUrl }}</small>
-          </span>
-        </button>
-        <div v-if="pagedSites.length === 0" class="integrity-empty">没有匹配的网页</div>
-      </div>
-
-      <div v-if="filteredSites.length > sitePageSize" class="pagination-bar compact-pagination integrity-pagination">
-        <button
-          class="page-button"
-          type="button"
-          :disabled="siteCurrentPage === 1"
-          @click="goToSitePage(siteCurrentPage - 1)"
-        >
-          上一页
-        </button>
-        <template v-for="page in sitePaginationItems" :key="page">
-          <button
-            v-if="typeof page === 'number'"
-            class="page-button"
-            :class="{ 'is-active': page === siteCurrentPage }"
-            type="button"
-            @click="goToSitePage(page)"
-          >
-            {{ page }}
-          </button>
-          <span v-else class="page-ellipsis">...</span>
-        </template>
-        <button
-          class="page-button"
-          type="button"
-          :disabled="siteCurrentPage === siteTotalPages"
-          @click="goToSitePage(siteCurrentPage + 1)"
-        >
-          下一页
-        </button>
-        <form class="page-jump-form" @submit.prevent="jumpToSitePage">
-          <span>跳至</span>
-          <input
-            v-model="sitePageJump"
-            type="number"
-            min="1"
-            :max="siteTotalPages"
-            aria-label="跳转网页选择页码"
-          />
-          <button class="page-button" type="submit">确定</button>
-        </form>
-      </div>
-
-      <div class="integrity-actions">
-        <button
-          class="primary-button"
-          type="button"
-          :disabled="selectedIds.length === 0 || checking || repairing"
-          @click="runCheck"
-        >
-          {{ checking ? "检查中..." : "开始检查" }}
-        </button>
-      </div>
-
       <div v-if="errorMessage" class="form-error">{{ errorMessage }}</div>
 
-      <template v-if="result">
+      <template v-if="!result">
+        <div class="integrity-toolbar">
+          <div>
+            <strong>选择要检查的网页</strong>
+            <span>已选 {{ selectedIds.length }}/{{ sites.length }}，当前筛选 {{ filteredSites.length }} 个</span>
+          </div>
+          <button class="secondary-button compact-action-button" type="button" @click="toggleAll">
+            {{ allFilteredSelected ? "取消全选" : "全选筛选结果" }}
+          </button>
+        </div>
+
+        <label class="search-box integrity-search-box">
+          <span>⌕</span>
+          <input
+            v-model.trim="siteKeyword"
+            type="search"
+            placeholder="搜索网页备注或地址..."
+          />
+        </label>
+
+        <div class="integrity-site-list">
+          <button
+            v-for="site in pagedSites"
+            :key="site.id"
+            class="integrity-site-row"
+            :class="{ 'is-selected': selectedIds.includes(site.id) }"
+            type="button"
+            @click="toggleSite(site.id)"
+          >
+            <span class="selection-box" :class="{ 'is-selected': selectedIds.includes(site.id) }">
+              <span v-if="selectedIds.includes(site.id)">✓</span>
+            </span>
+            <span>
+              <strong>{{ site.remark }}</strong>
+              <small>{{ site.pageUrl }}</small>
+            </span>
+          </button>
+          <div v-if="pagedSites.length === 0" class="integrity-empty">没有匹配的网页</div>
+        </div>
+
+        <div v-if="filteredSites.length > sitePageSize" class="pagination-bar compact-pagination integrity-pagination">
+          <button
+            class="page-button"
+            type="button"
+            :disabled="siteCurrentPage === 1"
+            @click="goToSitePage(siteCurrentPage - 1)"
+          >
+            上一页
+          </button>
+          <template v-for="page in sitePaginationItems" :key="page">
+            <button
+              v-if="typeof page === 'number'"
+              class="page-button"
+              :class="{ 'is-active': page === siteCurrentPage }"
+              type="button"
+              @click="goToSitePage(page)"
+            >
+              {{ page }}
+            </button>
+            <span v-else class="page-ellipsis">...</span>
+          </template>
+          <button
+            class="page-button"
+            type="button"
+            :disabled="siteCurrentPage === siteTotalPages"
+            @click="goToSitePage(siteCurrentPage + 1)"
+          >
+            下一页
+          </button>
+          <form class="page-jump-form" @submit.prevent="jumpToSitePage">
+            <span>跳至</span>
+            <input
+              v-model="sitePageJump"
+              type="number"
+              min="1"
+              :max="siteTotalPages"
+              aria-label="跳转网页选择页码"
+            />
+            <button class="page-button" type="submit">确定</button>
+          </form>
+        </div>
+
+        <div class="integrity-actions">
+          <button
+            class="primary-button"
+            type="button"
+            :disabled="selectedIds.length === 0 || checking || repairing || hasRunningTask"
+            @click="runCheck"
+          >
+            {{ checkButtonText }}
+          </button>
+        </div>
+      </template>
+
+      <template v-else>
+        <div class="integrity-result-top">
+          <div>
+            <strong>检查结果</strong>
+            <span>已检查 {{ result.summary.siteCount }} 个网页，{{ result.summary.videoCount }} 条完成视频</span>
+          </div>
+          <button class="secondary-button compact-action-button" type="button" @click="backToSelection">
+            返回重新选择
+          </button>
+        </div>
+
         <div class="integrity-summary">
           <div>
             <span>检查网页</span>
             <strong>{{ result.summary.siteCount }}</strong>
           </div>
           <div>
-            <span>视频记录</span>
+            <span>完成视频</span>
             <strong>{{ result.summary.videoCount }}</strong>
           </div>
           <div>
-            <span>正常记录</span>
+            <span>文件完整</span>
             <strong>{{ result.summary.normalCount }}</strong>
           </div>
           <div>
-            <span>异常记录</span>
+            <span>缺失记录</span>
             <strong>{{ result.summary.issueCount }}</strong>
           </div>
           <div>
-            <span>可修复</span>
+            <span>可补齐</span>
             <strong>{{ result.summary.fixableCount }}</strong>
           </div>
         </div>
@@ -140,12 +152,12 @@
             </label>
             <button
               v-if="result.summary.fixableCount > 0"
-              class="quiet-danger-button"
+              class="primary-action-button"
               type="button"
-              :disabled="repairing"
+              :disabled="repairing || hasRunningTask"
               @click="runRepair"
             >
-              {{ repairing ? "修复中..." : "按检查结果修复状态" }}
+              {{ repairButtonText }}
             </button>
           </div>
         </div>
@@ -175,7 +187,7 @@
             <tbody v-else>
               <tr>
                 <td colspan="5" class="empty-detail-cell">
-                  {{ issueKeyword ? "没有匹配的异常明细" : "没有发现文件缺失或状态不一致" }}
+                  {{ issueKeyword ? "没有匹配的异常明细" : "已完成视频的本地文件都完整" }}
                 </td>
               </tr>
             </tbody>
@@ -234,12 +246,16 @@ import BaseModal from "./BaseModal.vue"
 import { checkFileIntegrity, repairFileIntegrity } from "../api/integrityCheck"
 import { buildPaginationItems, clampPage } from "../utils/pagination"
 
-defineEmits(["close"])
+const emit = defineEmits(["close", "repair-started"])
 
 const props = defineProps({
   sites: {
     type: Array,
     required: true,
+  },
+  hasRunningTask: {
+    type: Boolean,
+    default: false,
   },
 })
 
@@ -289,6 +305,18 @@ const allFilteredSelected = computed(() =>
   filteredSites.value.length > 0 &&
   filteredSites.value.every((site) => selectedIds.value.includes(site.id)),
 )
+
+const checkButtonText = computed(() => {
+  if (checking.value) return "检查中..."
+  if (props.hasRunningTask) return "任务运行中"
+  return "开始检查"
+})
+
+const repairButtonText = computed(() => {
+  if (repairing.value) return "创建任务中..."
+  if (props.hasRunningTask) return "任务运行中"
+  return "补齐缺失文件"
+})
 
 const issueDetails = computed(() => result.value?.details ?? [])
 
@@ -352,6 +380,13 @@ function jumpToIssuePage() {
   issuePageJump.value = ""
 }
 
+function backToSelection() {
+  result.value = null
+  issueKeyword.value = ""
+  issueCurrentPage.value = 1
+  issuePageJump.value = ""
+}
+
 async function runCheck() {
   errorMessage.value = ""
   checking.value = true
@@ -368,16 +403,18 @@ async function runCheck() {
 
 async function runRepair() {
   if (!result.value || result.value.summary.fixableCount === 0) return
-  const confirmed = window.confirm("将按本地最高产物修复所选网页的运行数据库状态。是否继续？")
+  const confirmed = window.confirm("将重新运行缺失文件的视频，补齐 mp4、wav 和 Word 文档。是否继续？")
   if (!confirmed) return
 
   errorMessage.value = ""
   repairing.value = true
   try {
-    await repairFileIntegrity(selectedIds.value)
-    result.value = await checkFileIntegrity(selectedIds.value)
+    const response = await repairFileIntegrity(selectedIds.value)
+    window.alert(response?.message || "缺失文件补齐任务已创建")
+    emit("repair-started", response)
+    emit("close")
   } catch (error) {
-    errorMessage.value = error.message || "修复失败"
+    errorMessage.value = error.message || "创建补齐任务失败"
   } finally {
     repairing.value = false
   }

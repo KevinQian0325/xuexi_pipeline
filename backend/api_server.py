@@ -244,11 +244,76 @@ def check_file_integrity(payload: IntegrityCheckRequest) -> dict[str, Any]:
 
 
 @app.post("/api/integrity-check/repair")
-def repair_file_integrity(payload: IntegrityCheckRequest) -> dict[str, Any]:
+def repair_file_integrity(
+    payload: IntegrityCheckRequest,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
     if not payload.siteIds:
-        raise HTTPException(status_code=400, detail="请选择要修复的网页")
+        raise HTTPException(status_code=400, detail="请选择要补齐文件的网页")
+    if app_store.has_running_task_runs():
+        raise HTTPException(status_code=409, detail="当前有运行中的任务，不能创建文件补齐任务")
 
-    return integrity_checker.repair_sites(payload.siteIds)
+    prepared = integrity_checker.prepare_repair_sites(payload.siteIds)
+    targets = prepared.get("targets", [])
+    if not targets:
+        raise HTTPException(status_code=400, detail="没有需要补齐文件的视频")
+
+    now = now_string()
+    env_config = app_store.get_env_config()
+    new_runs = []
+    background_sites = []
+    for target in targets:
+        site = target["site"]
+        item_ids = sorted({str(item_id) for item_id in target["itemIds"]})
+        details = []
+        for index, detail in enumerate(target["details"], start=1):
+            details.append({
+                "id": detail["itemId"],
+                "title": detail["videoTitle"],
+                "detailUrl": detail.get("detailUrl") or "",
+                "publishTime": detail.get("publishTime") or "",
+                "executedAt": now,
+                "status": "PROCESSING",
+                "mp4Path": detail.get("mp4Path") or "",
+                "wavPath": detail.get("wavPath") or "",
+                "docxPath": detail.get("docxPath") or "",
+                "errorStep": "",
+                "errorType": "",
+                "errorMessage": "",
+                "sortOrder": index,
+            })
+
+        new_runs.append({
+            "remark": f"文件补齐：{site['remark']}",
+            "pageUrl": site["pageUrl"],
+            "resultDir": build_result_dir(env_config["resultFilesDir"], site["remark"]),
+            "status": "RUNNING",
+            "successCount": 0,
+            "totalCount": len(item_ids),
+            "executedAt": now,
+            "duration": "00:00:00",
+            "startDate": None,
+            "endDate": None,
+            "details": details,
+        })
+        background_sites.append({
+            "remark": site["remark"],
+            "pageUrl": site["pageUrl"],
+            "startDate": None,
+            "endDate": None,
+            "itemIds": item_ids,
+            "includeExistingDone": False,
+        })
+
+    created_runs = app_store.create_task_runs(new_runs)
+    for created_run, site in zip(created_runs, background_sites, strict=True):
+        background_tasks.add_task(run_real_pipeline_for_task, created_run["id"], site)
+
+    return {
+        "items": created_runs,
+        "prepared": prepared,
+        "message": "缺失文件补齐任务已创建",
+    }
 
 
 @app.post("/api/task-runs/start")
@@ -357,6 +422,7 @@ def rerun_selected_task_videos(
             "startDate": run.get("startDate"),
             "endDate": run.get("endDate"),
             "itemIds": item_ids,
+            "includeExistingDone": False,
         },
     )
 

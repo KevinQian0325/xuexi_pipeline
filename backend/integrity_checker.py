@@ -7,31 +7,26 @@ from backend.build_index import create_table
 from backend.config import (
     DB_DIR,
     STATUS_AUDIO_DONE,
-    STATUS_ASR_DONE,
     STATUS_DOCX_DONE,
-    STATUS_FAILED,
     STATUS_M3U8_DONE,
     STATUS_NEW,
     STATUS_VIDEO_DONE,
     page_url_to_site_name,
 )
-from backend.process_video import sync_video_statuses_with_local_artifacts
 
 
-ARTIFACT_LABELS = {
-    "mp4_path": "视频文件",
-    "wav_path": "音频文件",
-    "docx_path": "Word 文档",
-}
+ARTIFACTS = [
+    ("mp4_path", "视频文件", "视频文件路径缺失", "视频文件不存在"),
+    ("wav_path", "音频文件", "音频文件路径缺失", "音频文件不存在"),
+    ("docx_path", "Word 文档", "Word 文档路径缺失", "Word 文档不存在"),
+]
 
 STATUS_LABELS = {
     STATUS_NEW: "待处理",
     STATUS_M3U8_DONE: "已解析视频地址",
     STATUS_VIDEO_DONE: "已下载视频",
     STATUS_AUDIO_DONE: "已提取音频",
-    STATUS_ASR_DONE: "已完成转写",
     STATUS_DOCX_DONE: "已生成文档",
-    STATUS_FAILED: "处理失败",
 }
 
 
@@ -42,50 +37,58 @@ def existing_file(path: str | None) -> bool:
     return candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0
 
 
-def expected_status_for_row(row: sqlite3.Row) -> str:
-    if existing_file(row["docx_path"]):
-        return STATUS_DOCX_DONE
-    if existing_file(row["wav_path"]):
-        return STATUS_AUDIO_DONE
-    if existing_file(row["mp4_path"]):
-        return STATUS_VIDEO_DONE
-    if row["m3u8_url"]:
-        return STATUS_M3U8_DONE
-    return STATUS_NEW
-
-
-def missing_artifacts_for_row(row: sqlite3.Row) -> list[str]:
-    missing = []
-    for field_name, label in ARTIFACT_LABELS.items():
+def artifact_issues_for_row(row: sqlite3.Row) -> list[dict[str, str]]:
+    issues = []
+    for field_name, label, missing_path_label, missing_file_label in ARTIFACTS:
         stored_path = row[field_name]
-        if stored_path and not existing_file(stored_path):
-            missing.append(label)
-    return missing
+        if not stored_path:
+            issues.append({
+                "field": field_name,
+                "artifact": label,
+                "message": missing_path_label,
+                "path": "",
+            })
+        elif not existing_file(stored_path):
+            issues.append({
+                "field": field_name,
+                "artifact": label,
+                "message": missing_file_label,
+                "path": stored_path,
+            })
+    return issues
 
 
-def has_processing_trace(row: sqlite3.Row) -> bool:
-    return (
-        row["status"] != STATUS_NEW
-        or bool(row["m3u8_url"])
-        or bool(row["mp4_path"])
-        or bool(row["wav_path"])
-        or bool(row["docx_path"])
-    )
+def repair_status_for_issues(row: sqlite3.Row, issue_fields: list[str]) -> str:
+    if "mp4_path" in issue_fields:
+        return STATUS_M3U8_DONE if row["m3u8_url"] else STATUS_NEW
+    if "wav_path" in issue_fields:
+        return STATUS_VIDEO_DONE
+    return STATUS_AUDIO_DONE
 
 
-def processed_time_bounds(conn: sqlite3.Connection) -> tuple[str | None, str | None]:
-    row = conn.execute("""
-    SELECT MIN(publish_time), MAX(publish_time)
-    FROM videos
-    WHERE status != ?
-       OR m3u8_url IS NOT NULL
-       OR mp4_path != ''
-       OR wav_path != ''
-       OR docx_path != ''
-    """, (STATUS_NEW,)).fetchone()
-    if row is None:
-        return None, None
-    return row[0], row[1]
+def reset_fields_for_repair_status(status: str) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "status": status,
+        "error_step": None,
+        "error_type": None,
+        "error_message": None,
+        "docx_done_at": None,
+    }
+    if status in {STATUS_NEW, STATUS_M3U8_DONE, STATUS_VIDEO_DONE}:
+        fields.update({
+            "audio_done_at": None,
+            "asr_done_at": None,
+            "wav_size": None,
+            "audio_duration_ms": None,
+        })
+    if status in {STATUS_NEW, STATUS_M3U8_DONE}:
+        fields.update({
+            "video_done_at": None,
+            "mp4_size": None,
+        })
+    if status == STATUS_NEW:
+        fields["m3u8_done_at"] = None
+    return fields
 
 
 def db_paths_for_site(page_url: str) -> list[Path]:
@@ -108,10 +111,10 @@ def load_sites(site_ids: list[int]) -> list[dict[str, Any]]:
 def check_sites(site_ids: list[int]) -> dict[str, Any]:
     sites = load_sites(site_ids)
     details = []
-    total_records = 0
+    completed_records = 0
     checked_db_count = 0
+    missing_path_count = 0
     missing_file_count = 0
-    status_mismatch_count = 0
 
     for site in sites:
         db_paths = db_paths_for_site(site["pageUrl"])
@@ -149,27 +152,27 @@ def check_sites(site_ids: list[int]) -> dict[str, Any]:
                     m3u8_url,
                     mp4_path,
                     wav_path,
-                    docx_path
+                    docx_path,
+                    error_step,
+                    error_type,
+                    error_message
                 FROM videos
+                WHERE status = ?
                 ORDER BY publish_time DESC
-                """).fetchall()
+                """, (STATUS_DOCX_DONE,)).fetchall()
             finally:
                 conn.close()
 
-            rows = [row for row in rows if has_processing_trace(row)]
             for row in rows:
-                total_records += 1
-                missing_artifacts = missing_artifacts_for_row(row)
-                expected_status = expected_status_for_row(row)
-                status_mismatch = row["status"] != expected_status
-                if missing_artifacts:
-                    missing_file_count += 1
-                if status_mismatch:
-                    status_mismatch_count += 1
-
-                if not missing_artifacts and not status_mismatch:
+                completed_records += 1
+                artifact_issues = artifact_issues_for_row(row)
+                if not artifact_issues:
                     continue
 
+                missing_path_count += sum(1 for issue in artifact_issues if not issue["path"])
+                missing_file_count += sum(1 for issue in artifact_issues if issue["path"])
+                issue_fields = [issue["field"] for issue in artifact_issues]
+                rebuild_status = repair_status_for_issues(row, issue_fields)
                 details.append({
                     "id": f"{site['id']}-{db_path.stem}-{row['item_id']}",
                     "siteId": site["id"],
@@ -182,10 +185,15 @@ def check_sites(site_ids: list[int]) -> dict[str, Any]:
                     "publishTime": row["publish_time"] or "",
                     "currentStatus": row["status"],
                     "currentStatusLabel": STATUS_LABELS.get(row["status"], row["status"]),
-                    "suggestedStatus": expected_status,
-                    "suggestedStatusLabel": STATUS_LABELS.get(expected_status, expected_status),
-                    "missingArtifacts": missing_artifacts,
-                    "message": "、".join(missing_artifacts) + " 不存在" if missing_artifacts else "数据库状态与本地最高产物不一致",
+                    "rebuildFromStatus": rebuild_status,
+                    "rebuildFromStatusLabel": STATUS_LABELS.get(rebuild_status, rebuild_status),
+                    "missingArtifacts": [issue["artifact"] for issue in artifact_issues],
+                    "missingArtifactFields": issue_fields,
+                    "artifactIssues": artifact_issues,
+                    "mp4Path": row["mp4_path"] or "",
+                    "wavPath": row["wav_path"] or "",
+                    "docxPath": row["docx_path"] or "",
+                    "message": "、".join(issue["message"] for issue in artifact_issues),
                     "fixable": True,
                 })
 
@@ -193,54 +201,63 @@ def check_sites(site_ids: list[int]) -> dict[str, Any]:
         "summary": {
             "siteCount": len(sites),
             "dbCount": checked_db_count,
-            "videoCount": total_records,
-            "normalCount": max(0, total_records - len([item for item in details if item.get("fixable")])),
+            "videoCount": completed_records,
+            "normalCount": max(0, completed_records - len([item for item in details if item.get("fixable")])),
             "issueCount": len(details),
+            "missingPathCount": missing_path_count,
             "missingFileCount": missing_file_count,
-            "statusMismatchCount": status_mismatch_count,
             "fixableCount": len([item for item in details if item.get("fixable")]),
         },
         "details": details,
     }
 
 
-def repair_sites(site_ids: list[int]) -> dict[str, Any]:
-    sites = load_sites(site_ids)
-    repaired_items = []
-    checked_db_count = 0
+def prepare_repair_sites(site_ids: list[int]) -> dict[str, Any]:
+    check_result = check_sites(site_ids)
+    details = [
+        detail
+        for detail in check_result["details"]
+        if detail.get("fixable") and detail.get("itemId") and detail.get("dbPath")
+    ]
 
-    for site in sites:
-        for db_path in db_paths_for_site(site["pageUrl"]):
-            checked_db_count += 1
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            try:
-                create_table(conn)
-                start_time, end_time = processed_time_bounds(conn)
-                if start_time is None and end_time is None:
-                    changed_items = []
-                else:
-                    changed_items = sync_video_statuses_with_local_artifacts(
-                        conn,
-                        start_time=start_time,
-                        end_time=end_time,
-                    )
-            finally:
-                conn.close()
+    prepared_items = []
+    for detail in details:
+        db_path = Path(detail["dbPath"])
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            create_table(conn)
+            fields = reset_fields_for_repair_status(detail["rebuildFromStatus"])
+            set_clause = ", ".join(f"{field_name} = ?" for field_name in fields)
+            conn.execute(
+                f"UPDATE videos SET {set_clause}, updated_at = datetime('now', 'localtime') WHERE item_id = ?",
+                list(fields.values()) + [detail["itemId"]],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        prepared_items.append(detail)
 
-            for item in changed_items:
-                repaired_items.append({
-                    **item,
-                    "siteId": site["id"],
-                    "siteRemark": site["remark"],
-                    "dbPath": str(db_path),
-                })
+    targets_by_site_id: dict[int, dict[str, Any]] = {}
+    sites_by_id = {site["id"]: site for site in load_sites(site_ids)}
+    for detail in prepared_items:
+        site_id = int(detail["siteId"])
+        site = sites_by_id.get(site_id)
+        if site is None:
+            continue
+        target = targets_by_site_id.setdefault(site_id, {
+            "site": site,
+            "itemIds": [],
+            "details": [],
+        })
+        target["itemIds"].append(detail["itemId"])
+        target["details"].append(detail)
 
     return {
         "summary": {
-            "siteCount": len(sites),
-            "dbCount": checked_db_count,
-            "repairedCount": len(repaired_items),
+            **check_result["summary"],
+            "preparedCount": len(prepared_items),
         },
-        "items": repaired_items,
+        "items": prepared_items,
+        "targets": list(targets_by_site_id.values()),
     }
