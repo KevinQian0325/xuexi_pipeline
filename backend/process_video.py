@@ -581,7 +581,7 @@ def mp4_to_wav(mp4_path: Path, wav_path: Path) -> None:
 # =========================================================
 def recognize_flash(file_path: Path) -> dict:
     if not APP_ID or not ACCESS_TOKEN:
-        raise ValueError("请先在 .env 中配置 XUEXI_APP_ID 和 XUEXI_ACCESS_TOKEN。")
+        raise ValueError("请先在前端密钥配置中填写 XUEXI_APP_ID 和 XUEXI_ACCESS_TOKEN。")
 
     headers = {
         "X-Api-App-Key": APP_ID,
