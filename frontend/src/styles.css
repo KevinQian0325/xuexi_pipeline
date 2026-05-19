@@ -437,6 +437,13 @@ a {
   color: #475569;
 }
 
+.task-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .primary-action-button {
   border-color: #1677ff;
   background: #1677ff;
@@ -449,6 +456,7 @@ a {
   color: #c91835;
 }
 
+.secondary-action-button:disabled,
 .primary-action-button:disabled,
 .danger-outline-button:disabled {
   cursor: not-allowed;

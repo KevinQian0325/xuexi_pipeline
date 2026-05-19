@@ -6,6 +6,7 @@ export const VIDEO_STATUS_LABELS = {
   AUDIO_DONE: "已提取音频",
   ASR_DONE: "已完成转写",
   PROCESSING: "处理中",
+  PENDING: "待恢复处理",
   DOCX_DONE: "已生成文档",
   EXISTING: "已存在",
   IGNORED: "已忽略",
@@ -20,6 +21,7 @@ export const VIDEO_FAILURE_LABELS = {
   AUDIO_DONE: "处理失败：转写失败",
   ASR_DONE: "处理失败：文档生成失败",
   PROCESSING: "处理失败：未完成",
+  PENDING: "处理失败：未完成",
   FAILED: "处理失败：运行异常",
 }
 
@@ -41,6 +43,8 @@ export const ASR_ERROR_CODE_LABELS = {
 
 export const RUN_STATUS_LABELS = {
   RUNNING: "执行中",
+  STOP_REQUESTED: "停止中",
+  STOPPED: "已停止",
   SUCCESS: "全部完成",
   PARTIAL_FAILED: "部分失败",
   FAILED: "执行失败",
@@ -83,6 +87,13 @@ export function getVideoStatusView(status, runStatus, errorStep = "", errorMessa
     }
   }
 
+  if (status === "PENDING") {
+    return {
+      label: VIDEO_STATUS_LABELS.PENDING,
+      className: "is-muted",
+    }
+  }
+
   if (status === "DOCX_DONE") {
     return {
       label: VIDEO_STATUS_LABELS.DOCX_DONE,
@@ -90,7 +101,7 @@ export function getVideoStatusView(status, runStatus, errorStep = "", errorMessa
     }
   }
 
-  if (runStatus === "RUNNING" && status !== "FAILED") {
+  if ((runStatus === "RUNNING" || runStatus === "STOP_REQUESTED") && status !== "FAILED") {
     return {
       label: formatVideoStatus(status),
       className: status === "NEW" ? "is-muted" : "is-progress",
@@ -124,6 +135,10 @@ export function formatRunStatus(status) {
 export function formatRunProgress(status, successCount, totalCount) {
   if (status === "RUNNING" && Number(totalCount) === 0) {
     return "等待处理中"
+  }
+
+  if (status === "STOP_REQUESTED" && Number(totalCount) === 0) {
+    return "停止中"
   }
 
   if (status === "SUCCESS" && Number(totalCount) === 0) {

@@ -264,7 +264,9 @@ const ignoredDetails = computed(() =>
 )
 
 const failedDetails = computed(() =>
-  normalDetails.value.filter((item) => item.status !== "DOCX_DONE" && item.status !== "IGNORED"),
+  normalDetails.value.filter((item) =>
+    !["DOCX_DONE", "IGNORED", "PENDING", "PROCESSING"].includes(item.status),
+  ),
 )
 
 const visibleDetails = computed(() =>
@@ -300,7 +302,7 @@ const pagedDetails = computed(() => {
 })
 
 const hasFailedVideos = computed(() =>
-  props.run.status !== "RUNNING" &&
+  !["RUNNING", "STOP_REQUESTED"].includes(props.run.status) &&
   failedDetails.value.length > 0,
 )
 

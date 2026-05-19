@@ -269,8 +269,11 @@ def finish_crawl_run(
     success_count: int,
     failed_count: int,
     error_message: str | None = None,
+    status_override: str | None = None,
 ) -> None:
-    if failed_count > 0 and success_count > 0:
+    if status_override:
+        status = status_override
+    elif failed_count > 0 and success_count > 0:
         status = "PARTIAL_FAILED"
     elif failed_count > 0:
         status = "FAILED"
@@ -825,6 +828,44 @@ def shade_cell(cell, fill: str) -> None:
     tc_pr.append(shd)
 
 
+def set_cell_width(cell, width) -> None:
+    cell.width = width
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_w = tc_pr.find(qn("w:tcW"))
+    if tc_w is None:
+        tc_w = OxmlElement("w:tcW")
+        tc_pr.append(tc_w)
+    tc_w.set(qn("w:type"), "dxa")
+    tc_w.set(qn("w:w"), str(width.twips))
+
+
+def set_table_fixed_width(table, column_widths) -> None:
+    table.autofit = False
+    total_width = sum(width.twips for width in column_widths)
+
+    tbl_pr = table._tbl.tblPr
+    tbl_w = tbl_pr.find(qn("w:tblW"))
+    if tbl_w is None:
+        tbl_w = OxmlElement("w:tblW")
+        tbl_pr.append(tbl_w)
+    tbl_w.set(qn("w:type"), "dxa")
+    tbl_w.set(qn("w:w"), str(total_width))
+
+    tbl_layout = tbl_pr.find(qn("w:tblLayout"))
+    if tbl_layout is None:
+        tbl_layout = OxmlElement("w:tblLayout")
+        tbl_pr.append(tbl_layout)
+    tbl_layout.set(qn("w:type"), "fixed")
+
+    for grid_col, width in zip(table._tbl.tblGrid.gridCol_lst, column_widths, strict=True):
+        grid_col.set(qn("w:w"), str(width.twips))
+
+
+def set_row_cell_widths(row, column_widths) -> None:
+    for cell, width in zip(row.cells, column_widths, strict=True):
+        set_cell_width(cell, width)
+
+
 def json_to_word(data: dict, output_docx: Path, title: str) -> None:
     duration_ms = data["audio_info"]["duration"]
     full_text = data["result"]["text"]
@@ -833,6 +874,8 @@ def json_to_word(data: dict, output_docx: Path, title: str) -> None:
     doc = Document()
 
     section = doc.sections[0]
+    section.page_width = Cm(21)
+    section.page_height = Cm(29.7)
     section.top_margin = Cm(2.2)
     section.bottom_margin = Cm(2.0)
     section.left_margin = Cm(2.3)
@@ -865,13 +908,11 @@ def json_to_word(data: dict, output_docx: Path, title: str) -> None:
 
     table = doc.add_table(rows=1, cols=3)
     table.style = "Table Grid"
-    table.autofit = False
-
-    table.columns[0].width = Cm(2.6)
-    table.columns[1].width = Cm(2.6)
-    table.columns[2].width = Cm(11.2)
+    timeline_column_widths = [Cm(2.0), Cm(2.0), Cm(12.0)]
+    set_table_fixed_width(table, timeline_column_widths)
 
     headers = table.rows[0].cells
+    set_row_cell_widths(table.rows[0], timeline_column_widths)
     headers[0].text = "开始"
     headers[1].text = "结束"
     headers[2].text = "内容"
@@ -884,12 +925,14 @@ def json_to_word(data: dict, output_docx: Path, title: str) -> None:
         shade_cell(cell, "D9EAF7")
 
     for utt in utterances:
-        row = table.add_row().cells
-        row[0].text = format_ms(utt["start_time"])
-        row[1].text = format_ms(utt["end_time"])
-        row[2].text = utt["text"]
+        row = table.add_row()
+        set_row_cell_widths(row, timeline_column_widths)
+        cells = row.cells
+        cells[0].text = format_ms(utt["start_time"])
+        cells[1].text = format_ms(utt["end_time"])
+        cells[2].text = utt["text"]
 
-        for i, cell in enumerate(row):
+        for i, cell in enumerate(cells):
             for p in cell.paragraphs:
                 if i < 2:
                     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1151,6 +1194,7 @@ def process_one_db(
     page_url: str | None = None,
     run_started_at: str | None = None,
     on_progress: Callable[[dict], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
     target_item_ids: list[str] | None = None,
     include_existing_done: bool = True,
 ) -> dict:
@@ -1191,7 +1235,7 @@ def process_one_db(
     print(f"待处理视频数：{len(pending_rows)}")
     print(f"已存在成品视频数：{len(existing_done_rows)}")
 
-    processed_item_ids = [row["item_id"] for row in pending_rows]
+    processed_item_ids = []
     if on_progress:
         on_progress({
             "event": "db_start",
@@ -1247,8 +1291,57 @@ def process_one_db(
         target_count=len(pending_rows),
     )
 
+    stopped = False
+    pending_after_stop_item_ids = []
+
+    def build_pending_detail(pending_row: sqlite3.Row) -> dict:
+        return {
+            "id": pending_row["item_id"],
+            "title": pending_row["title"],
+            "detailUrl": pending_row["detail_url"],
+            "publishTime": pending_row["publish_time"] or "",
+            "executedAt": run_started_at,
+            "status": "PENDING",
+            "mp4Path": pending_row["mp4_path"] or "",
+            "wavPath": pending_row["wav_path"] or "",
+            "docxPath": pending_row["docx_path"] or "",
+            "errorStep": "",
+            "errorType": "",
+            "errorMessage": "",
+        }
+
+    def stop_after_current_video(next_index: int) -> None:
+        nonlocal stopped, pending_after_stop_item_ids
+        remaining_rows = pending_rows[next_index:]
+        if not remaining_rows:
+            return
+
+        stopped = True
+        pending_after_stop_item_ids = [pending_row["item_id"] for pending_row in remaining_rows]
+        if on_progress and remaining_rows:
+            on_progress({
+                "event": "stop_requested",
+                "site_name": site_name,
+                "json_name": json_name,
+                "db_path": str(db_path),
+                "total_count": len(pending_rows),
+                "processed_count": len(final_statuses),
+                "success_count": sum(1 for status in final_statuses if status == STATUS_DOCX_DONE),
+                "failed_count": sum(1 for status in final_statuses if status == STATUS_FAILED),
+                "details": [
+                    build_pending_detail(pending_row)
+                    for pending_row in remaining_rows
+                ],
+            })
+
     final_statuses = []
-    for row in pending_rows:
+    if should_stop and should_stop():
+        stop_after_current_video(0)
+
+    for index, row in enumerate(pending_rows):
+        if stopped:
+            break
+
         final_status = process_one_video(
             conn=conn,
             site_name=site_name,
@@ -1258,6 +1351,7 @@ def process_one_db(
             page_url=page_url,
         )
         final_statuses.append(final_status)
+        processed_item_ids.append(row["item_id"])
         if on_progress:
             updated_row = conn.execute("""
             SELECT
@@ -1305,6 +1399,10 @@ def process_one_db(
                 ] if updated_row is not None else [],
             })
 
+        if should_stop and should_stop():
+            stop_after_current_video(index + 1)
+            break
+
     run_success_count = sum(1 for status in final_statuses if status == STATUS_DOCX_DONE)
     run_failed_count = sum(1 for status in final_statuses if status == STATUS_FAILED)
     finish_crawl_run(
@@ -1312,6 +1410,8 @@ def process_one_db(
         run_id=run_id,
         success_count=run_success_count,
         failed_count=run_failed_count,
+        status_override="STOPPED" if stopped else None,
+        error_message="用户请求停止" if stopped else None,
     )
 
     remain = conn.execute(
@@ -1337,13 +1437,15 @@ def process_one_db(
         "db_path": str(db_path),
         "run_id": run_id,
         "page_url": page_url,
-        "processed_count": len(pending_rows),
+        "processed_count": len(processed_item_ids),
         "run_success_count": run_success_count,
         "run_failed_count": run_failed_count,
         "done_count": done,
         "failed_count": failed,
         "remaining_count": remain,
         "processed_item_ids": processed_item_ids,
+        "stopped": stopped,
+        "pending_item_ids": pending_after_stop_item_ids,
     }
 
 
@@ -1357,6 +1459,7 @@ def process_sites(
     run_id: str | None = None,
     run_started_at: str | None = None,
     on_progress: Callable[[dict], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
     target_item_ids: list[str] | None = None,
     include_existing_done: bool = True,
 ) -> list[dict]:
@@ -1397,9 +1500,12 @@ def process_sites(
             page_url=page_url_by_site.get(site_name, site_name),
             run_started_at=run_started_at,
             on_progress=on_progress,
+            should_stop=should_stop,
             target_item_ids=target_item_ids,
             include_existing_done=include_existing_done,
         )
         results.append(result)
+        if result.get("stopped"):
+            break
 
     return results

@@ -24,6 +24,18 @@ export function startListenerSiteRun(sites) {
   })
 }
 
+export function stopRunningTaskRuns() {
+  return request("/api/task-runs/stop-running", {
+    method: "POST",
+  })
+}
+
+export function resumeTaskRun(runId) {
+  return request(`/api/task-runs/${runId}/resume`, {
+    method: "POST",
+  })
+}
+
 export function rerunFailedTaskVideos(runId) {
   return request(`/api/task-runs/${runId}/rerun-failed`, {
     method: "POST",

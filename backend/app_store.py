@@ -553,7 +553,7 @@ def has_running_task_runs(run_ids: list[int] | None = None) -> bool:
         row = conn.execute(f"""
         SELECT COUNT(*)
         FROM task_runs
-        WHERE status = 'RUNNING'
+        WHERE status IN ('RUNNING', 'STOP_REQUESTED')
         {id_filter}
         """, params).fetchone()
     return int(row[0]) > 0
@@ -598,21 +598,11 @@ def recalculate_task_run_summary(conn: sqlite3.Connection, run_id: int | str) ->
         "SELECT status FROM task_runs WHERE id = ?",
         (run_id,),
     ).fetchone()
-    if run_row is None or run_row["status"] == "RUNNING":
+    if run_row is None or run_row["status"] in {"RUNNING", "STOP_REQUESTED", "STOPPED"}:
         return
 
     details = load_task_run_details(conn, int(run_id))
-    counted_details = [
-        detail
-        for detail in details
-        if detail.get("status") != "EXISTING"
-    ]
-    success_count = sum(
-        1
-        for detail in counted_details
-        if detail.get("status") in {"DOCX_DONE", "IGNORED"}
-    )
-    total_count = len(counted_details)
+    success_count, total_count = calculate_task_run_counts_from_details(details)
     status = calculate_task_run_status(success_count, total_count)
     conn.execute("""
     UPDATE task_runs
@@ -666,7 +656,7 @@ def sync_task_run_detail_states_by_item_id(
         str(detail["id"]): detail
         for detail in details
         if str(detail.get("id", "")).strip()
-        and detail.get("status") not in {"EXISTING", "PROCESSING"}
+        and detail.get("status") not in {"EXISTING", "PROCESSING", "PENDING"}
     }
     if not sync_details:
         return
@@ -864,6 +854,128 @@ def update_task_run_summary(
         return cursor.rowcount > 0
 
 
+def get_task_run_status(run_id: int | str) -> str | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["status"]
+
+
+def is_task_run_stop_requested(run_id: int | str) -> bool:
+    return get_task_run_status(run_id) == "STOP_REQUESTED"
+
+
+def request_stop_task_run(run_id: int | str) -> bool:
+    with connect() as conn:
+        cursor = conn.execute("""
+        UPDATE task_runs
+        SET status = 'STOP_REQUESTED',
+            updated_at = ?
+        WHERE id = ?
+          AND status = 'RUNNING'
+        """, (
+            now_string(),
+            run_id,
+        ))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def request_stop_running_task_runs() -> int:
+    with connect() as conn:
+        cursor = conn.execute("""
+        UPDATE task_runs
+        SET status = 'STOP_REQUESTED',
+            updated_at = ?
+        WHERE status = 'RUNNING'
+        """, (now_string(),))
+        conn.commit()
+        return cursor.rowcount
+
+
+def prepare_stopped_task_run_resume(run_id: int | str) -> dict[str, Any] | None:
+    with connect() as conn:
+        run_row = conn.execute(
+            "SELECT * FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if run_row is None:
+            return None
+        if run_row["status"] != "STOPPED":
+            return {
+                "error": "INVALID_STATUS",
+                "run": row_to_task_run(run_row, load_task_run_details(conn, int(run_id))),
+            }
+
+        pending_rows = conn.execute("""
+        SELECT item_id
+        FROM task_run_details
+        WHERE run_id = ?
+          AND status = 'PENDING'
+        ORDER BY sort_order
+        """, (run_id,)).fetchall()
+        pending_item_ids = [str(row["item_id"]) for row in pending_rows]
+        if not pending_item_ids:
+            return {
+                "error": "NO_PENDING",
+                "run": row_to_task_run(run_row, load_task_run_details(conn, int(run_id))),
+            }
+
+        now = now_string()
+        conn.execute("""
+        UPDATE task_runs
+        SET status = 'RUNNING',
+            executed_at = ?,
+            duration = '00:00:00',
+            updated_at = ?
+        WHERE id = ?
+        """, (
+            now,
+            now,
+            run_id,
+        ))
+        conn.execute("""
+        UPDATE task_run_details
+        SET status = 'PROCESSING',
+            executed_at = ?,
+            error_step = '',
+            error_type = '',
+            error_message = ''
+        WHERE run_id = ?
+          AND status = 'PENDING'
+        """, (
+            now,
+            run_id,
+        ))
+        details = load_task_run_details(conn, int(run_id))
+        success_count, total_count = calculate_task_run_counts_from_details(details)
+        conn.execute("""
+        UPDATE task_runs
+        SET success_count = ?,
+            total_count = ?,
+            updated_at = ?
+        WHERE id = ?
+        """, (
+            success_count,
+            total_count,
+            now,
+            run_id,
+        ))
+        conn.commit()
+
+    run = get_task_run(str(run_id))
+    if run is None:
+        return None
+    return {
+        "run": run,
+        "pending_item_ids": pending_item_ids,
+    }
+
+
 def upsert_task_run_progress_details(
     run_id: int | str,
     details: list[dict[str, Any]],
@@ -987,18 +1099,11 @@ def replace_task_run_details(
         else:
             merged_details = details
 
-        counted_details = [
-            detail
-            for detail in merged_details
-            if detail.get("status") != "EXISTING"
-        ]
-        success_count = sum(
-            1
-            for detail in counted_details
-            if detail.get("status") in {"DOCX_DONE", "IGNORED"}
-        )
-        total_count = len(counted_details)
-        merged_status = calculate_task_run_status(success_count, total_count)
+        success_count, total_count = calculate_task_run_counts_from_details(merged_details)
+        if status in {"STOPPED"}:
+            merged_status = status
+        else:
+            merged_status = calculate_task_run_status(success_count, total_count)
 
         conn.execute("DELETE FROM task_run_details WHERE run_id = ?", (run_id,))
         for index, detail in enumerate(merged_details, start=1):
@@ -1075,6 +1180,22 @@ def calculate_task_run_status(success_count: int, total_count: int) -> str:
     if success_count > 0:
         return "PARTIAL_FAILED"
     return "FAILED"
+
+
+def calculate_task_run_counts_from_details(
+    details: list[dict[str, Any]],
+) -> tuple[int, int]:
+    counted_details = [
+        detail
+        for detail in details
+        if detail.get("status") != "EXISTING"
+    ]
+    success_count = sum(
+        1
+        for detail in counted_details
+        if detail.get("status") in {"DOCX_DONE", "IGNORED"}
+    )
+    return success_count, len(counted_details)
 
 
 def get_task_run(run_id: str) -> dict[str, Any] | None:

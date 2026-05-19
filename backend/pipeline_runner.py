@@ -189,26 +189,27 @@ def calculate_run_status(details: list[dict[str, Any]]) -> str:
 
 
 def build_task_progress_updater(app_run_id: int, started_at: float):
-    totals_by_db: dict[str, int] = {}
-    processed_by_db: dict[str, int] = {}
-
     def update_progress(progress: dict[str, Any]) -> None:
-        db_path = progress["db_path"]
-        totals_by_db[db_path] = int(progress.get("total_count", 0))
-        processed_by_db[db_path] = int(progress.get("processed_count", 0))
-
-        total_count = sum(totals_by_db.values())
-        processed_count = sum(processed_by_db.values())
-        app_store.update_task_run_summary(
-            app_run_id,
-            status="RUNNING",
-            success_count=processed_count,
-            total_count=total_count,
-            duration=format_duration(time.time() - started_at),
-        )
+        current_status = app_store.get_task_run_status(app_run_id)
+        next_status = "STOP_REQUESTED" if current_status == "STOP_REQUESTED" else "RUNNING"
         details = progress.get("details", [])
         if details:
-            app_store.upsert_task_run_progress_details(app_run_id, details)
+            updated_run = app_store.upsert_task_run_progress_details(app_run_id, details)
+            if updated_run is not None:
+                app_store.update_task_run_summary(
+                    app_run_id,
+                    status=next_status,
+                    success_count=updated_run["successCount"],
+                    total_count=updated_run["totalCount"],
+                    duration=format_duration(time.time() - started_at),
+                )
+                return
+
+        app_store.update_task_run_summary(
+            app_run_id,
+            status=next_status,
+            duration=format_duration(time.time() - started_at),
+        )
 
     return update_progress
 
@@ -224,9 +225,11 @@ def run_real_pipeline_for_task(app_run_id: int, site: dict[str, Any]) -> None:
         f"remark={site.get('remark')} page_url={page_url}"
     )
 
+    current_status = app_store.get_task_run_status(app_run_id)
+    initial_status = "STOP_REQUESTED" if current_status == "STOP_REQUESTED" else "RUNNING"
     app_store.update_task_run_summary(
         app_run_id,
-        status="RUNNING",
+        status=initial_status,
         executed_at=executed_at,
         duration="00:00:00",
     )
@@ -252,6 +255,7 @@ def run_real_pipeline_for_task(app_run_id: int, site: dict[str, Any]) -> None:
 
         write_pipeline_log(f"PROCESS_VIDEO_START app_run_id={app_run_id}")
         update_task_progress = build_task_progress_updater(app_run_id, started_at)
+        should_stop = lambda: app_store.is_task_run_stop_requested(app_run_id)
         process_results = process_sites(
             target_page_urls=[page_url],
             start_time=start_time,
@@ -259,6 +263,7 @@ def run_real_pipeline_for_task(app_run_id: int, site: dict[str, Any]) -> None:
             run_id=pipeline_run_id,
             run_started_at=executed_at,
             on_progress=update_task_progress,
+            should_stop=should_stop,
             target_item_ids=site.get("itemIds"),
             include_existing_done=site.get("includeExistingDone", True),
         )
@@ -282,7 +287,8 @@ def run_real_pipeline_for_task(app_run_id: int, site: dict[str, Any]) -> None:
         )
 
         details = load_task_details_from_process_results(process_results)
-        status = calculate_run_status(details)
+        stopped = any(result.get("stopped") for result in process_results)
+        status = "STOPPED" if stopped else calculate_run_status(details)
         app_store.replace_task_run_details(
             app_run_id,
             details,

@@ -345,18 +345,69 @@ def start_task_runs(payload: TaskRunStart, background_tasks: BackgroundTasks) ->
     return {"items": created_runs, "message": "运行任务已创建"}
 
 
+@app.post("/api/task-runs/stop-running")
+def stop_running_task_runs() -> dict[str, Any]:
+    stopped_count = app_store.request_stop_running_task_runs()
+    if stopped_count == 0:
+        raise HTTPException(status_code=400, detail="当前没有运行中的任务")
+    return {"stoppedCount": stopped_count, "message": "已请求停止，当前视频处理完成后会停止"}
+
+
+@app.post("/api/task-runs/{run_id}/stop")
+def stop_task_run(run_id: str) -> dict[str, Any]:
+    if not app_store.request_stop_task_run(run_id):
+        run = app_store.get_task_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="任务记录不存在")
+        if run["status"] == "STOP_REQUESTED":
+            return {"item": run, "message": "任务已在停止中"}
+        raise HTTPException(status_code=409, detail="只有执行中的任务可以停止")
+
+    updated_run = app_store.get_task_run(run_id)
+    return {"item": updated_run, "message": "已请求停止，当前视频处理完成后会停止"}
+
+
+@app.post("/api/task-runs/{run_id}/resume")
+def resume_task_run(run_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    prepared = app_store.prepare_stopped_task_run_resume(run_id)
+    if prepared is None:
+        raise HTTPException(status_code=404, detail="任务记录不存在")
+    if prepared.get("error") == "INVALID_STATUS":
+        raise HTTPException(status_code=409, detail="只有已停止的任务可以恢复运行")
+    if prepared.get("error") == "NO_PENDING":
+        raise HTTPException(status_code=400, detail="没有待恢复处理的视频")
+
+    run = prepared["run"]
+    item_ids = prepared["pending_item_ids"]
+    background_tasks.add_task(
+        run_real_pipeline_for_task,
+        int(run["id"]),
+        {
+            "remark": run["remark"],
+            "pageUrl": run["pageUrl"],
+            "startDate": run.get("startDate"),
+            "endDate": run.get("endDate"),
+            "itemIds": item_ids,
+            "includeExistingDone": False,
+        },
+    )
+
+    updated_run = app_store.get_task_run(run_id)
+    return {"item": updated_run, "message": "已恢复运行"}
+
+
 @app.post("/api/task-runs/{run_id}/rerun-failed")
 def rerun_failed_task_videos(run_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
     run = app_store.get_task_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="任务记录不存在")
-    if run["status"] == "RUNNING":
+    if run["status"] in {"RUNNING", "STOP_REQUESTED"}:
         raise HTTPException(status_code=409, detail="任务仍在运行中")
 
     failed_details = [
         detail
         for detail in run["details"]
-        if detail["status"] not in {"DOCX_DONE", "EXISTING", "IGNORED"}
+        if detail["status"] not in {"DOCX_DONE", "EXISTING", "IGNORED", "PENDING", "PROCESSING"}
     ]
     if not failed_details:
         raise HTTPException(status_code=400, detail="没有失败视频需要重新运行")
@@ -395,13 +446,13 @@ def rerun_selected_task_videos(
     run = app_store.get_task_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="任务记录不存在")
-    if run["status"] == "RUNNING":
+    if run["status"] in {"RUNNING", "STOP_REQUESTED"}:
         raise HTTPException(status_code=409, detail="任务仍在运行中")
 
     available_failed_ids = {
         str(detail["id"])
         for detail in run["details"]
-        if detail["status"] not in {"DOCX_DONE", "EXISTING", "IGNORED"}
+        if detail["status"] not in {"DOCX_DONE", "EXISTING", "IGNORED", "PENDING", "PROCESSING"}
     }
     invalid_ids = [item_id for item_id in item_ids if item_id not in available_failed_ids]
     if invalid_ids:
@@ -439,13 +490,13 @@ def ignore_task_run_videos(run_id: str, payload: TaskRunVideoAction) -> dict[str
     run = app_store.get_task_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="任务记录不存在")
-    if run["status"] == "RUNNING":
+    if run["status"] in {"RUNNING", "STOP_REQUESTED"}:
         raise HTTPException(status_code=409, detail="任务仍在运行中，不能忽略视频")
 
     available_failed_ids = {
         str(detail["id"])
         for detail in run["details"]
-        if detail["status"] not in {"DOCX_DONE", "EXISTING", "IGNORED"}
+        if detail["status"] not in {"DOCX_DONE", "EXISTING", "IGNORED", "PENDING", "PROCESSING"}
     }
     invalid_ids = [item_id for item_id in item_ids if item_id not in available_failed_ids]
     if invalid_ids:

@@ -60,7 +60,7 @@
               <button
                 class="run-button"
                 type="button"
-                :disabled="runningSites"
+                :disabled="runningSites || hasActiveTask"
                 @click="runEnabledSites"
               >
                 {{ runningSites ? "运行中..." : "运行" }}
@@ -187,10 +187,19 @@
             </div>
             <div class="section-actions">
               <button
+                v-if="!taskDeleteMode && (hasRunningTask || hasStopRequestedTask)"
+                class="secondary-button compact-action-button"
+                type="button"
+                :disabled="!hasRunningTask || stoppingRuns || hasStopRequestedTask"
+                @click="stopRunningTasks"
+              >
+                {{ hasStopRequestedTask || stoppingRuns ? "停止中..." : "停止运行" }}
+              </button>
+              <button
                 v-if="!taskDeleteMode"
                 class="quiet-danger-button"
                 type="button"
-                :disabled="taskRows.length === 0 || hasRunningTask"
+                :disabled="taskRows.length === 0 || hasActiveTask"
                 @click="enterTaskDeleteMode"
               >
                 清除记录
@@ -222,7 +231,7 @@
                 <button
                   class="quiet-danger-button"
                   type="button"
-                  :disabled="taskRows.length === 0 || hasRunningTask"
+                  :disabled="taskRows.length === 0 || hasActiveTask"
                   @click="clearAllTaskRunRecords"
                 >
                   清除全部
@@ -302,9 +311,20 @@
                 <td>{{ row.executedAt }}</td>
                 <td>{{ row.duration }}</td>
                 <td>
-                  <button class="secondary-action-button" type="button" @click="openTaskDetail(row)">
-                    查看
-                  </button>
+                  <div class="task-row-actions">
+                    <button class="secondary-action-button" type="button" @click="openTaskDetail(row)">
+                      查看
+                    </button>
+                    <button
+                      v-if="row.status === 'STOPPED'"
+                      class="secondary-action-button"
+                      type="button"
+                      :disabled="resumingRunId === row.id || hasActiveTask"
+                      @click="resumeStoppedTask(row)"
+                    >
+                      {{ resumingRunId === row.id ? "恢复中..." : "恢复" }}
+                    </button>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -393,7 +413,7 @@
     <FileIntegrityCheckModal
       v-if="modalState === 'integrity-check'"
       :sites="integrityCheckSites"
-      :has-running-task="hasRunningTask"
+      :has-running-task="hasActiveTask"
       @close="closeModal"
       @repair-started="handleIntegrityRepairStarted"
     />
@@ -445,7 +465,7 @@ import {
 } from "./api/listenerSites"
 import { getEnvConfig, updateEnvConfig } from "./api/envConfig"
 import { openServerPath } from "./api/localPaths"
-import { clearTaskRuns, deleteTaskRuns, ignoreTaskRunVideos, listTaskRuns, rerunFailedTaskVideos, rerunTaskRunVideos, startListenerSiteRun } from "./api/taskRuns"
+import { clearTaskRuns, deleteTaskRuns, ignoreTaskRunVideos, listTaskRuns, rerunFailedTaskVideos, rerunTaskRunVideos, resumeTaskRun, startListenerSiteRun, stopRunningTaskRuns } from "./api/taskRuns"
 import { formatRunProgress } from "./utils/statusLabels"
 import { buildPaginationItems, clampPage } from "./utils/pagination"
 import { isServerHostAccess } from "./utils/serverAccess"
@@ -466,7 +486,9 @@ const modalState = ref(null)
 const currentRowId = ref(null)
 const selectedTaskRunId = ref(null)
 const retryingRunId = ref(null)
+const resumingRunId = ref(null)
 const runningSites = ref(false)
+const stoppingRuns = ref(false)
 const taskDeleteMode = ref(false)
 const selectedTaskRunIds = ref([])
 const currentPage = ref(1)
@@ -487,6 +509,14 @@ const selectedTaskRun = computed(() =>
 
 const hasRunningTask = computed(() =>
   taskRows.value.some((item) => item.status === "RUNNING"),
+)
+
+const hasStopRequestedTask = computed(() =>
+  taskRows.value.some((item) => item.status === "STOP_REQUESTED"),
+)
+
+const hasActiveTask = computed(() =>
+  taskRows.value.some((item) => item.status === "RUNNING" || item.status === "STOP_REQUESTED"),
 )
 
 const activeSearchKeyword = computed({
@@ -662,7 +692,7 @@ async function removeRow(id) {
 }
 
 async function runEnabledSites() {
-  if (runningSites.value || hasRunningTask.value) {
+  if (runningSites.value || hasActiveTask.value) {
     window.alert("当前已有运行中的任务，请等待任务完成后再运行。")
     return
   }
@@ -696,6 +726,43 @@ async function runEnabledSites() {
     taskCurrentPage.value = 1
   } finally {
     runningSites.value = false
+  }
+}
+
+async function stopRunningTasks() {
+  if (!hasRunningTask.value || stoppingRuns.value) return
+
+  const confirmed = window.confirm("将请求停止当前运行中的任务。正在处理的视频会先跑完，然后任务停止。是否继续？")
+  if (!confirmed) return
+
+  stoppingRuns.value = true
+  try {
+    await stopRunningTaskRuns()
+    await loadTaskRows()
+  } catch (error) {
+    window.alert(error.message || "停止任务失败。")
+  } finally {
+    stoppingRuns.value = false
+  }
+}
+
+async function resumeStoppedTask(row) {
+  if (hasActiveTask.value) {
+    window.alert("当前已有运行中的任务，请等待任务完成后再恢复。")
+    return
+  }
+
+  const confirmed = window.confirm(`将恢复“${row.remark}”中待恢复处理的视频。是否继续？`)
+  if (!confirmed) return
+
+  resumingRunId.value = row.id
+  try {
+    await resumeTaskRun(row.id)
+    await loadTaskRows()
+  } catch (error) {
+    window.alert(error.message || "恢复任务失败。")
+  } finally {
+    resumingRunId.value = null
   }
 }
 
@@ -792,7 +859,7 @@ async function rerunSelectedFailedVideos({ runId, ids }) {
 }
 
 function enterTaskDeleteMode() {
-  if (hasRunningTask.value) {
+  if (hasActiveTask.value) {
     window.alert("当前有运行中的任务，请等待任务完成后再清除记录。")
     return
   }
@@ -827,7 +894,7 @@ function toggleCurrentTaskPageSelection() {
 
 async function deleteSelectedTaskRunRecords() {
   if (selectedTaskRunIds.value.length === 0) return
-  if (hasRunningTask.value) {
+  if (hasActiveTask.value) {
     window.alert("当前有运行中的任务，请等待任务完成后再清除记录。")
     return
   }
@@ -847,7 +914,7 @@ async function deleteSelectedTaskRunRecords() {
 
 async function clearAllTaskRunRecords() {
   if (taskRows.value.length === 0) return
-  if (hasRunningTask.value) {
+  if (hasActiveTask.value) {
     window.alert("当前有运行中的任务，请等待任务完成后再清除记录。")
     return
   }
@@ -878,6 +945,7 @@ function runStatusClass(status) {
   if (status === "SUCCESS") return "is-success"
   if (status === "FAILED") return "is-error"
   if (status === "PARTIAL_FAILED") return "is-warning"
+  if (status === "STOPPED") return "is-muted"
   return "is-progress"
 }
 
@@ -900,7 +968,7 @@ function clearTaskRefreshTimer() {
 
 function scheduleTaskRefreshIfRunning() {
   clearTaskRefreshTimer()
-  if (!taskRows.value.some((item) => item.status === "RUNNING")) return
+  if (!taskRows.value.some((item) => item.status === "RUNNING" || item.status === "STOP_REQUESTED")) return
 
   taskRefreshTimer = setTimeout(() => {
     loadTaskRows()
