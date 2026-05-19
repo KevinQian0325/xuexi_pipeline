@@ -2,6 +2,7 @@
 # Secrets and local config
 # =========================
 .env*
+README.md
 *.pem
 *.key
 
